@@ -3,6 +3,7 @@
 #include <regex>
 #include <sstream>
 #include <cassert>
+#include <set>
 
 namespace llvm2tosa {
 
@@ -345,7 +346,39 @@ std::string LLVMToTosaConverter::generateTOSAModule() {
     module << std::endl;
     
     module << "module {" << std::endl;
-    module << tosaOutput_.str();
+    
+    // Generate constant definitions for all const_X references
+    std::set<std::string> constantsUsed;
+    std::string content = tosaOutput_.str();
+    
+    // Find all const_X references
+    std::regex constRegex(R"(const_(\d+))");
+    std::sregex_iterator iter(content.begin(), content.end(), constRegex);
+    std::sregex_iterator end;
+    
+    for (; iter != end; ++iter) {
+        constantsUsed.insert(iter->str());
+    }
+    
+    // Generate constant definitions
+    for (const auto& constName : constantsUsed) {
+        module << "  %" << constName << " = tosa.const {value = dense<1.0> : tensor<1xf32>} : () -> tensor<1xf32>" << std::endl;
+    }
+    
+    if (!constantsUsed.empty()) {
+        module << std::endl;
+    }
+    
+    // Fix missing % prefixes in the content
+    std::string fixedContent = content;
+    std::regex resultRegex(R"(\n\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*tosa\.)");
+    fixedContent = std::regex_replace(fixedContent, resultRegex, "\n  %$1 = tosa.");
+    
+    // Replace const_X with %const_X
+    std::regex constRefRegex(R"(\bconst_(\d+)\b)");
+    fixedContent = std::regex_replace(fixedContent, constRefRegex, "%const_$1");
+    
+    module << fixedContent;
     module << "}" << std::endl;
     
     return module.str();

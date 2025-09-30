@@ -1,0 +1,1 @@
+/usr/bin/c++  -Wall -Wextra -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/converter_demo.dir/examples/simple_converter_demo.cpp.o CMakeFiles/converter_demo.dir/src/CompleteConverter.cpp.o -o converter_demo

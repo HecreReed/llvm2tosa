@@ -169,6 +169,33 @@ struct MemoryAllocation {
     std::string initialValue;
 };
 
+// High-level pattern recognition structures
+struct MatrixOperation {
+    enum Type { MATRIX_VECTOR_ADD, MATRIX_MATRIX_ADD, ELEMENT_WISE_OP, UNKNOWN };
+    Type type;
+    std::vector<std::string> inputTensors;
+    std::vector<TensorShape> inputShapes;
+    TensorShape outputShape;
+    std::string operation; // "add", "mul", etc.
+    bool hasBroadcast = false;
+};
+
+struct NestedLoopPattern {
+    std::vector<std::string> inductionVars; // [i, j] for 2D loops
+    std::vector<int64_t> bounds; // [rows, cols] 
+    std::vector<std::string> loopBlocks;
+    std::string bodyBlock;
+    bool isMatrixLoop = false;
+    MatrixOperation detectedOp;
+};
+
+struct FunctionSignature {
+    std::string name;
+    std::vector<std::pair<std::string, TensorType>> parameters;
+    TensorType returnType;
+    bool isVoidReturn = true;
+};
+
 /**
  * Complete LLVM IR to TOSA IR Converter
  * Handles all 68 LLVM instructions and converts to appropriate TOSA operations
@@ -233,6 +260,15 @@ private:
     std::string convertLoopToWhileLoop(const LoopInfo& loop);
     std::string convertConditionalToCondIf(const ConditionalInfo& conditional);
     
+    // High-level pattern recognition and analysis
+    void analyzeHighLevelPatterns();
+    NestedLoopPattern analyzeNestedLoops(const std::string& functionName);
+    MatrixOperation detectMatrixOperation(const NestedLoopPattern& loopPattern);
+    FunctionSignature inferTensorSignature(const std::string& functionName);
+    bool isMatrixVectorBroadcast(const NestedLoopPattern& pattern);
+    TensorShape inferShapeFromLoopBounds(const std::vector<int64_t>& bounds);
+    std::string generateHighLevelTOSA(const MatrixOperation& matrixOp, const std::string& funcName);
+    
     // TOSA operation generation
     std::string generateTOSAOperation(TOSAOpcode opcode, 
                                      const std::vector<std::string>& inputs,
@@ -266,6 +302,11 @@ private:
     std::vector<ConditionalInfo> conditionals_;
     std::vector<std::string> globalVariables_;
     std::vector<std::string> functions_;
+    
+    // High-level pattern recognition state
+    std::map<std::string, NestedLoopPattern> detectedLoopPatterns_;
+    std::map<std::string, MatrixOperation> detectedMatrixOps_;
+    std::map<std::string, FunctionSignature> tensorSignatures_;
     
     // Generated TOSA code
     std::stringstream tosaOutput_;

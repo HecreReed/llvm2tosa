@@ -1,0 +1,1 @@
+/usr/bin/c++  -Wall -Wextra -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/llvm2tosa.dir/main.cpp.o CMakeFiles/llvm2tosa.dir/src/CompleteConverter.cpp.o -o llvm2tosa

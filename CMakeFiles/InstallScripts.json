@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/mac/project/llvm/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

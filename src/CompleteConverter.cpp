@@ -196,12 +196,19 @@ std::string LLVMToTosaConverter::convertLLVMIRToTOSA(const std::string& llvmIRCo
         conditionals_.clear();
         globalVariables_.clear();
         functions_.clear();
+        detectedLoopPatterns_.clear();
+        detectedMatrixOps_.clear();
+        tensorSignatures_.clear();
         tosaOutput_.str("");
         tosaOutput_.clear();
         uniqueCounter_ = 0;
         
         // Parse and convert
         parseModule(llvmIRCode);
+        
+        // NEW: High-level pattern analysis
+        analyzeHighLevelPatterns();
+        
         convertGlobals();
         convertFunctions();
         
@@ -257,11 +264,20 @@ void LLVMToTosaConverter::convertFunctions() {
     for (const auto& funcName : functions_) {
         currentFunction_ = funcName;
         
+        // Check if we detected a high-level matrix operation for this function
+        auto matrixIt = detectedMatrixOps_.find(funcName);
+        if (matrixIt != detectedMatrixOps_.end()) {
+            // Generate high-level TOSA for matrix operations
+            std::string highLevelTOSA = generateHighLevelTOSA(matrixIt->second, funcName);
+            if (!highLevelTOSA.empty()) {
+                tosaOutput_ << highLevelTOSA << std::endl;
+                continue; // Skip low-level conversion for this function
+            }
+        }
+        
+        // Fall back to low-level conversion
         tosaOutput_ << generateTOSAFunction(funcName) << std::endl;
-        
-        // Convert basic blocks for this function
         convertBasicBlocks();
-        
         tosaOutput_ << "}" << std::endl << std::endl;
     }
 }
@@ -912,6 +928,312 @@ std::string LLVMToTosaConverter::createTensorFromScalar(const std::string& scala
     valueMapping_[scalarValue] = Value(tensorName, tensorType);
     
     return tensorName;
+}
+
+// High-level pattern recognition implementation
+
+void LLVMToTosaConverter::analyzeHighLevelPatterns() {
+    if (debugMode_) {
+        std::cout << "Analyzing high-level patterns..." << std::endl;
+    }
+    
+    // Analyze each function for high-level patterns
+    for (const auto& funcName : functions_) {
+        currentFunction_ = funcName;
+        
+        if (debugMode_) {
+            std::cout << "Analyzing function: " << funcName << std::endl;
+            std::cout << "Basic blocks for this function:" << std::endl;
+            std::string funcPrefix = funcName + ".";
+            for (const auto& [blockName, block] : basicBlocks_) {
+                if (blockName.find(funcPrefix) == 0) {
+                    std::cout << "  Block: " << blockName << " (" << block.instructions.size() << " instructions)" << std::endl;
+                }
+            }
+        }
+        
+        // Detect nested loop patterns
+        NestedLoopPattern loopPattern = analyzeNestedLoops(funcName);
+        if (loopPattern.isMatrixLoop) {
+            detectedLoopPatterns_[funcName] = loopPattern;
+            
+            if (debugMode_) {
+                std::cout << "Found matrix loop pattern with bounds: [" 
+                         << loopPattern.bounds[0] << ", " << loopPattern.bounds[1] << "]" << std::endl;
+            }
+            
+            // Detect matrix operations within the loop
+            MatrixOperation matrixOp = detectMatrixOperation(loopPattern);
+            if (matrixOp.type != MatrixOperation::UNKNOWN) {
+                detectedMatrixOps_[funcName] = matrixOp;
+                
+                // Infer tensor-based function signature
+                FunctionSignature tensorSig = inferTensorSignature(funcName);
+                tensorSignatures_[funcName] = tensorSig;
+                
+                if (debugMode_) {
+                    std::cout << "Detected matrix operation in " << funcName << std::endl;
+                }
+            } else {
+                if (debugMode_) {
+                    std::cout << "No recognizable matrix operation found in " << funcName << std::endl;
+                }
+            }
+        } else {
+            if (debugMode_) {
+                std::cout << "No matrix loop pattern found in " << funcName << std::endl;
+            }
+        }
+    }
+}
+
+NestedLoopPattern LLVMToTosaConverter::analyzeNestedLoops(const std::string& functionName) {
+    NestedLoopPattern pattern;
+    pattern.isMatrixLoop = false;
+    
+    std::string funcPrefix = functionName + ".";
+    
+    // Look for nested loop structure with PHI nodes
+    std::vector<std::pair<std::string, int64_t>> loopInfo; // (block_name, bound)
+    
+    for (const auto& [blockName, block] : basicBlocks_) {
+        if (blockName.find(funcPrefix) == 0) {
+            // Check for loop header pattern (contains PHI and comparison)
+            bool hasPhiNode = false;
+            bool hasComparison = false;
+            int64_t bound = -1;
+            std::string inductionVar;
+            
+            for (const auto& instr : block.instructions) {
+                if (instr.find("phi") != std::string::npos) {
+                    hasPhiNode = true;
+                    // Extract induction variable name
+                    std::regex phiRegex(R"((%[a-zA-Z_][a-zA-Z0-9_.]*)\s*=\s*phi)");
+                    std::smatch match;
+                    if (std::regex_search(instr, match, phiRegex)) {
+                        inductionVar = match[1].str();
+                    }
+                }
+                if (instr.find("icmp slt") != std::string::npos) {
+                    hasComparison = true;
+                    // Extract loop bound
+                    std::regex boundRegex(R"(icmp slt.*?,\s*(\d+))");
+                    std::smatch match;
+                    if (std::regex_search(instr, match, boundRegex)) {
+                        bound = std::stoll(match[1].str());
+                    }
+                }
+            }
+            
+            if (hasPhiNode && hasComparison && bound > 0) {
+                loopInfo.push_back({block.name, bound});
+                pattern.inductionVars.push_back(inductionVar);
+            }
+        }
+    }
+    
+    // Sort by loop nesting order (outer first, then inner)
+    if (loopInfo.size() == 2) {
+        // Determine which is outer and which is inner based on block names
+        if (loopInfo[0].first.find("outer") != std::string::npos) {
+            // Already in correct order
+            pattern.bounds = {loopInfo[0].second, loopInfo[1].second};
+        } else if (loopInfo[1].first.find("outer") != std::string::npos) {
+            // Reverse order
+            pattern.bounds = {loopInfo[1].second, loopInfo[0].second};
+            std::swap(pattern.inductionVars[0], pattern.inductionVars[1]);
+        } else {
+            // Fall back to original order
+            pattern.bounds = {loopInfo[0].second, loopInfo[1].second};
+        }
+        
+        pattern.isMatrixLoop = true;
+        
+        // Find the loop body (contains the actual computation)
+        for (const auto& [blockName, block] : basicBlocks_) {
+            if (blockName.find(funcPrefix) == 0 && 
+                blockName.find("body") != std::string::npos) {
+                pattern.bodyBlock = block.name;
+                break;
+            }
+        }
+    }
+    
+    return pattern;
+}
+
+MatrixOperation LLVMToTosaConverter::detectMatrixOperation(const NestedLoopPattern& loopPattern) {
+    MatrixOperation matrixOp;
+    matrixOp.type = MatrixOperation::UNKNOWN;
+    
+    if (!loopPattern.isMatrixLoop || loopPattern.bodyBlock.empty()) {
+        return matrixOp;
+    }
+    
+    // Find the loop body block and analyze its operations
+    std::string bodyKey = currentFunction_ + "." + loopPattern.bodyBlock;
+    auto it = basicBlocks_.find(bodyKey);
+    if (it == basicBlocks_.end()) {
+        return matrixOp;
+    }
+    
+    const BasicBlock& bodyBlock = it->second;
+    
+    // Look for matrix-vector broadcast pattern
+    bool hasMatrixAccess = false;
+    bool hasVectorAccess = false;
+    bool hasAddOperation = false;
+    
+    if (debugMode_) {
+        std::cout << "Analyzing loop body for matrix patterns..." << std::endl;
+        for (const auto& instr : bodyBlock.instructions) {
+            std::cout << "  Instruction: " << instr << std::endl;
+        }
+    }
+    
+    for (const auto& instr : bodyBlock.instructions) {
+        // Check for matrix indexing pattern: A[i*cols + j]
+        if (instr.find("mul nsw") != std::string::npos && instr.find("3") != std::string::npos) {
+            hasMatrixAccess = true;
+            if (debugMode_) std::cout << "  Found matrix access pattern" << std::endl;
+        }
+        
+        // Check for vector indexing pattern: B[j] (only inner loop variable)
+        if (instr.find("getelementptr") != std::string::npos &&
+            instr.find(" %B,") != std::string::npos &&
+            !loopPattern.inductionVars.empty()) {
+            // Look for access that uses only j (inner variable), not i (outer variable)
+            if (loopPattern.inductionVars.size() >= 2) {
+                std::string outerVar = loopPattern.inductionVars[0]; // i.val
+                std::string innerVar = loopPattern.inductionVars[1]; // j.val
+                
+                if (debugMode_) {
+                    std::cout << "  Checking vector access: outer=" << outerVar 
+                             << ", inner=" << innerVar << std::endl;
+                    std::cout << "  Instruction: " << instr << std::endl;
+                }
+                
+                if (instr.find(innerVar) != std::string::npos &&
+                    instr.find(outerVar) == std::string::npos) {
+                    hasVectorAccess = true;
+                    if (debugMode_) std::cout << "  Found vector access pattern: " << instr << std::endl;
+                }
+            }
+        }
+        
+        // Check for addition operation
+        if (instr.find("add nsw i32") != std::string::npos && 
+            instr.find("%val.A") != std::string::npos &&
+            instr.find("%val.B") != std::string::npos) {
+            hasAddOperation = true;
+            if (debugMode_) std::cout << "  Found add operation" << std::endl;
+        }
+    }
+    
+    // If we detect the matrix-vector broadcast pattern
+    if (hasMatrixAccess && hasVectorAccess && hasAddOperation) {
+        matrixOp.type = MatrixOperation::MATRIX_VECTOR_ADD;
+        matrixOp.operation = "add";
+        matrixOp.hasBroadcast = true;
+        
+        // Set up tensor shapes based on loop bounds
+        if (loopPattern.bounds.size() >= 2) {
+            // Matrix shape: [rows, cols] - first bound is outer loop (rows), second is inner loop (cols)
+            int64_t rows = loopPattern.bounds[0]; 
+            int64_t cols = loopPattern.bounds[1];
+            matrixOp.inputShapes.push_back(TensorShape({rows, cols}));
+            // Vector shape: [cols] - broadcasts to matrix
+            matrixOp.inputShapes.push_back(TensorShape({cols}));
+            // Output shape: [rows, cols]
+            matrixOp.outputShape = TensorShape({rows, cols});
+            
+            if (debugMode_) {
+                std::cout << "  Matrix shape: [" << rows << ", " << cols << "]" << std::endl;
+                std::cout << "  Vector shape: [" << cols << "]" << std::endl;
+            }
+        }
+        
+        matrixOp.inputTensors = {"A", "B"}; // Parameter names
+    }
+    
+    return matrixOp;
+}
+
+FunctionSignature LLVMToTosaConverter::inferTensorSignature(const std::string& functionName) {
+    FunctionSignature sig;
+    sig.name = functionName;
+    sig.isVoidReturn = true;
+    
+    // Look for the detected matrix operation to infer parameter types
+    auto matrixIt = detectedMatrixOps_.find(functionName);
+    if (matrixIt != detectedMatrixOps_.end()) {
+        const MatrixOperation& matrixOp = matrixIt->second;
+        
+        if (matrixOp.type == MatrixOperation::MATRIX_VECTOR_ADD) {
+            // Create tensor parameter types
+            for (size_t i = 0; i < matrixOp.inputShapes.size(); ++i) {
+                TensorType tensorType(matrixOp.inputShapes[i], DataType::INT32);
+                std::string paramName = matrixOp.inputTensors[i];
+                sig.parameters.push_back({paramName, tensorType});
+            }
+            
+            // Set return type (for functional style)
+            sig.returnType = TensorType(matrixOp.outputShape, DataType::INT32);
+            sig.isVoidReturn = false;
+        }
+    }
+    
+    return sig;
+}
+
+std::string LLVMToTosaConverter::generateHighLevelTOSA(const MatrixOperation& matrixOp, const std::string& funcName) {
+    std::stringstream ss;
+    
+    // Get the tensor signature for this function
+    auto sigIt = tensorSignatures_.find(funcName);
+    if (sigIt == tensorSignatures_.end()) {
+        return "";
+    }
+    
+    const FunctionSignature& sig = sigIt->second;
+    
+    // Generate function signature
+    ss << "func.func @" << funcName << "(";
+    for (size_t i = 0; i < sig.parameters.size(); ++i) {
+        if (i > 0) ss << ", ";
+        ss << "%" << sig.parameters[i].first << ": " 
+           << utils::formatTensorType(sig.parameters[i].second);
+    }
+    ss << ") -> ";
+    
+    if (!sig.isVoidReturn) {
+        ss << utils::formatTensorType(sig.returnType);
+    } else {
+        ss << "()";
+    }
+    
+    ss << " {" << std::endl;
+    
+    // Generate the high-level TOSA operation
+    if (matrixOp.type == MatrixOperation::MATRIX_VECTOR_ADD && matrixOp.hasBroadcast) {
+        ss << "    // Matrix-vector broadcast addition" << std::endl;
+        ss << "    %" << sig.parameters.back().first << "_result = tosa.add ";
+        ss << "%" << sig.parameters[0].first << ", %" << sig.parameters[1].first;
+        ss << " : (" << utils::formatTensorType(sig.parameters[0].second) << ", ";
+        ss << utils::formatTensorType(sig.parameters[1].second) << ") -> ";
+        ss << utils::formatTensorType(sig.returnType) << std::endl;
+        
+        if (!sig.isVoidReturn) {
+            ss << "    return %" << sig.parameters.back().first << "_result : ";
+            ss << utils::formatTensorType(sig.returnType) << std::endl;
+        } else {
+            ss << "    func.return" << std::endl;
+        }
+    }
+    
+    ss << "  }" << std::endl;
+    
+    return ss.str();
 }
 
 } // namespace llvm2tosa

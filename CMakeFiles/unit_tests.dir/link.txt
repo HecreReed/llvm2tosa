@@ -1,0 +1,1 @@
+/usr/bin/c++  -Wall -Wextra -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/unit_tests.dir/tests/unit_test.cpp.o CMakeFiles/unit_tests.dir/src/CompleteConverter.cpp.o -o unit_tests

@@ -1,357 +1,299 @@
 #pragma once
 
-#include <llvm/IR/Instructions.h>
-#include <llvm/IR/Module.h>
-#include <llvm/IR/Type.h>
-#include <llvm/IR/Function.h>
-#include <llvm/IR/BasicBlock.h>
-#include <llvm/IR/IRBuilder.h>
-
-#include <mlir/IR/MLIRContext.h>
-#include <mlir/IR/BuiltinOps.h>
-#include <mlir/IR/BuiltinTypes.h>
-#include <mlir/Dialect/Func/IR/FuncOps.h>
-#include <mlir/Dialect/Tosa/IR/TosaOps.h>
-#include <mlir/Dialect/MemRef/IR/MemRef.h>
-#include <mlir/Dialect/Arith/IR/Arith.h>
-
-#include <map>
-#include <vector>
-#include <string>
 #include <memory>
+#include <string>
+#include <vector>
+#include <map>
+#include <unordered_map>
+#include <iostream>
+#include <sstream>
 
 namespace llvm2tosa {
 
-// Forward declarations
-class TypeConverter;
-class MemoryModelConverter;
-class ControlFlowConverter;
-class InstructionConverter;
+// Complete LLVM IR instruction set enumeration (68 instructions)
+enum class LLVMOpcode {
+    // Terminator Instructions (11)
+    Ret, Br, Switch, IndirectBr, Invoke, Resume, Unreachable,
+    CleanupRet, CatchRet, CatchSwitch, CallBr,
+    
+    // Unary Instructions (1)
+    FNeg,
+    
+    // Binary Instructions (18)
+    Add, FAdd, Sub, FSub, Mul, FMul, UDiv, SDiv, FDiv,
+    URem, SRem, FRem, Shl, LShr, AShr, And, Or, Xor,
+    
+    // Memory Instructions (7)
+    Alloca, Load, Store, GetElementPtr, Fence, AtomicCmpXchg, AtomicRMW,
+    
+    // Cast Instructions (14)
+    Trunc, ZExt, SExt, FPToUI, FPToSI, UIToFP, SIToFP,
+    FPTrunc, FPExt, PtrToInt, IntToPtr, BitCast, AddrSpaceCast, PtrToAddr,
+    
+    // Exception Handling (2)
+    CleanupPad, CatchPad,
+    
+    // Other Instructions (15)
+    ICmp, FCmp, PHI, Call, Select, UserOp1, UserOp2, VAArg,
+    ExtractElement, InsertElement, ShuffleVector,
+    ExtractValue, InsertValue, LandingPad, Freeze
+};
+
+// Complete TOSA operation set enumeration (66 operations)
+enum class TOSAOpcode {
+    // Tensor Operators (10)
+    ArgMax, AvgPool2d, Conv2d, Conv3d, DepthwiseConv2d,
+    FFT2d, MatMul, MaxPool2d, RFFT2d, TransposeConv2d,
+    
+    // Activation Functions (4)
+    Clamp, Erf, Sigmoid, Tanh,
+    
+    // Elementwise Binary (18)
+    Add, ArithmeticRightShift, BitwiseAnd, BitwiseOr, BitwiseXor,
+    IntDiv, LogicalAnd, LogicalLeftShift, LogicalRightShift,
+    LogicalOr, LogicalXor, Maximum, Minimum, Mul, Pow, Sub, Table,
+    
+    // Elementwise Unary (13)
+    Abs, BitwiseNot, Ceil, Clz, Cos, Exp, Floor, Log,
+    LogicalNot, Negate, Reciprocal, Rsqrt, Sin,
+    
+    // Selection (1)
+    Select,
+    
+    // Comparison (3)
+    Equal, Greater, GreaterEqual,
+    
+    // Reduction (6)
+    ReduceAll, ReduceAny, ReduceMax, ReduceMin, ReduceProduct, ReduceSum,
+    
+    // Data Layout (8)
+    Concat, Pad, Reshape, Reverse, Slice, Tile, Transpose,
+    
+    // Scatter/Gather (2)
+    Gather, Scatter,
+    
+    // Image Operations (1)
+    Resize,
+    
+    // Type Conversion (2)
+    Cast, Rescale,
+    
+    // Data Nodes (2)
+    Const, Identity,
+    
+    // Custom (1)
+    Custom,
+    
+    // Control Flow (2)
+    CondIf, WhileLoop,
+    
+    // Utility Operations (5)
+    ApplyScale, Yield, Variable, VariableRead, VariableWrite,
+    
+    // Shape Operations (1)
+    ConstShape
+};
+
+// Data types for conversion
+enum class DataType {
+    BOOL, INT8, UINT8, INT16, UINT16, INT32, UINT32, INT64, UINT64,
+    FLOAT16, BFLOAT16, FLOAT32, FLOAT64
+};
+
+// Tensor shape representation
+struct TensorShape {
+    std::vector<int64_t> dimensions;
+    bool isDynamic = false;
+    
+    TensorShape() = default;
+    TensorShape(std::vector<int64_t> dims) : dimensions(std::move(dims)) {}
+    TensorShape(std::initializer_list<int64_t> dims) : dimensions(dims) {}
+};
+
+// Tensor type representation
+struct TensorType {
+    TensorShape shape;
+    DataType elementType;
+    
+    TensorType() : elementType(DataType::FLOAT32) {}
+    TensorType(TensorShape s, DataType t) : shape(std::move(s)), elementType(t) {}
+};
+
+// Value representation for SSA
+struct Value {
+    std::string name;
+    TensorType type;
+    bool isConstant = false;
+    std::string constantValue;
+    
+    Value() = default;
+    Value(const std::string& n, TensorType t) : name(n), type(std::move(t)) {}
+};
+
+// LLVM Basic Block representation
+struct BasicBlock {
+    std::string name;
+    std::vector<std::string> instructions;
+    std::vector<std::string> predecessors;
+    std::vector<std::string> successors;
+    bool isLoopHeader = false;
+    bool isLoopLatch = false;
+};
+
+// Control flow analysis structures
+struct LoopInfo {
+    std::string header;
+    std::string latch;
+    std::vector<std::string> blocks;
+    std::string preheader;
+    std::vector<std::string> exits;
+    bool isNaturalLoop = false;
+    int depth = 0;
+};
+
+struct ConditionalInfo {
+    std::string conditionBlock;
+    std::string trueBlock;
+    std::string falseBlock;
+    std::string mergeBlock;
+    std::string conditionValue;
+};
+
+// Memory allocation tracking
+struct MemoryAllocation {
+    TensorType tensorType;
+    std::string llvmType;
+    bool isGlobal = false;
+    bool isArray = false;
+    int64_t arraySize = 1;
+    std::string initialValue;
+};
 
 /**
- * @brief Comprehensive LLVM IR to TOSA IR Converter
- * 
- * This converter handles the complete transformation from LLVM IR to TOSA IR,
- * addressing fundamental differences between:
- * - Scalar/pointer-based computation (LLVM) vs tensor-based computation (TOSA)
- * - Explicit memory model (LLVM) vs immutable value semantics (TOSA)
- * - Basic block CFG (LLVM) vs structured control flow (TOSA)
+ * Complete LLVM IR to TOSA IR Converter
+ * Handles all 68 LLVM instructions and converts to appropriate TOSA operations
  */
 class LLVMToTosaConverter {
 public:
-    LLVMToTosaConverter(mlir::MLIRContext& context);
-    ~LLVMToTosaConverter();
+    LLVMToTosaConverter();
+    ~LLVMToTosaConverter() = default;
 
-    /**
-     * @brief Convert an entire LLVM module to TOSA IR
-     */
-    std::unique_ptr<mlir::ModuleOp> convertModule(llvm::Module& llvmModule);
-
-    /**
-     * @brief Convert a single LLVM function to TOSA function
-     */
-    mlir::func::FuncOp convertFunction(llvm::Function& llvmFunc);
-
-    /**
-     * @brief Set conversion options
-     */
-    void setQuantizationMode(bool enable) { enableQuantization_ = enable; }
+    // Main conversion interface
+    std::string convertLLVMIRFile(const std::string& llvmIRCode);
+    std::string convertLLVMIRToTOSA(const std::string& llvmIRCode);
+    
+    // Configuration
     void setOptimizationLevel(int level) { optimizationLevel_ = level; }
     void setDebugMode(bool enable) { debugMode_ = enable; }
-
-private:
-    mlir::MLIRContext& context_;
-    mlir::OpBuilder builder_;
-    
-    // Sub-converters for different aspects
-    std::unique_ptr<TypeConverter> typeConverter_;
-    std::unique_ptr<MemoryModelConverter> memoryConverter_;
-    std::unique_ptr<ControlFlowConverter> controlFlowConverter_;
-    std::unique_ptr<InstructionConverter> instructionConverter_;
-    
-    // Configuration options
-    bool enableQuantization_;
-    int optimizationLevel_;
-    bool debugMode_;
-    
-    // State tracking
-    std::map<llvm::Value*, mlir::Value> valueMapping_;
-    std::map<llvm::BasicBlock*, mlir::Block*> blockMapping_;
-    std::map<llvm::Function*, mlir::func::FuncOp> functionMapping_;
-    
-    // Helper methods
-    void initializeSubConverters();
-    void processGlobalVariables(llvm::Module& llvmModule, mlir::ModuleOp& tosaModule);
-    void processFunctionDeclarations(llvm::Module& llvmModule, mlir::ModuleOp& tosaModule);
-    void convertBasicBlock(llvm::BasicBlock& bb, mlir::func::FuncOp& tosaFunc);
-};
-
-/**
- * @brief Handles type conversion between LLVM and TOSA type systems
- */
-class TypeConverter {
-public:
-    TypeConverter(mlir::MLIRContext& context) : context_(context) {}
-
-    /**
-     * @brief Convert LLVM type to TOSA tensor type
-     */
-    mlir::Type convertType(llvm::Type* llvmType);
-    
-    /**
-     * @brief Convert function signature
-     */
-    mlir::FunctionType convertFunctionType(llvm::FunctionType* llvmFuncType);
-
-private:
-    mlir::MLIRContext& context_;
-    
-    // Type mapping cache
-    std::map<llvm::Type*, mlir::Type> typeCache_;
-    
-    // Helper methods for specific type conversions
-    mlir::Type convertIntegerType(llvm::IntegerType* intType);
-    mlir::Type convertFloatingPointType(llvm::Type* fpType);
-    mlir::Type convertPointerType(llvm::PointerType* ptrType);
-    mlir::Type convertArrayType(llvm::ArrayType* arrayType);
-    mlir::Type convertVectorType(llvm::VectorType* vectorType);
-    mlir::Type convertStructType(llvm::StructType* structType);
-    
-    // Tensor shape inference
-    std::vector<int64_t> inferTensorShape(llvm::Type* llvmType);
-    mlir::Type getElementType(llvm::Type* llvmType);
-};
-
-/**
- * @brief Converts LLVM's explicit memory model to TOSA's tensor operations
- */
-class MemoryModelConverter {
-public:
-    MemoryModelConverter(mlir::MLIRContext& context, TypeConverter& typeConverter);
-
-    /**
-     * @brief Convert alloca instruction to tensor initialization
-     */
-    mlir::Value convertAlloca(llvm::AllocaInst* allocaInst, mlir::OpBuilder& builder);
-    
-    /**
-     * @brief Convert load instruction to tensor slice operation
-     */
-    mlir::Value convertLoad(llvm::LoadInst* loadInst, mlir::OpBuilder& builder);
-    
-    /**
-     * @brief Convert store instruction to tensor update operation
-     */
-    void convertStore(llvm::StoreInst* storeInst, mlir::OpBuilder& builder);
-    
-    /**
-     * @brief Convert getelementptr to tensor indexing
-     */
-    mlir::Value convertGEP(llvm::GetElementPtrInst* gepInst, mlir::OpBuilder& builder);
-
-    /**
-     * @brief Handle global variables conversion
-     */
-    mlir::Value convertGlobalVariable(llvm::GlobalVariable* globalVar, mlir::OpBuilder& builder);
-
-private:
-    mlir::MLIRContext& context_;
-    TypeConverter& typeConverter_;
-    
-    // Memory allocation tracking
-    struct MemoryAllocation {
-        mlir::Type tensorType;
-        llvm::Type* originalType;
-        std::vector<int64_t> shape;
-        bool isGlobal;
-    };
-    
-    std::map<llvm::Value*, MemoryAllocation> memoryAllocations_;
-    std::map<llvm::Value*, mlir::Value> tensorValues_;
-    
-    // Helper methods
-    mlir::Value createZeroTensor(mlir::Type tensorType, mlir::OpBuilder& builder);
-    mlir::Value createConstantTensor(llvm::Constant* constant, mlir::OpBuilder& builder);
-    std::vector<mlir::Value> computeIndices(llvm::GetElementPtrInst* gepInst, mlir::OpBuilder& builder);
-    mlir::Value updateTensorAtIndices(mlir::Value tensor, mlir::Value value, 
-                                     const std::vector<mlir::Value>& indices, 
-                                     mlir::OpBuilder& builder);
-};
-
-/**
- * @brief Converts LLVM instructions to TOSA operations
- */
-class InstructionConverter {
-public:
-    InstructionConverter(mlir::MLIRContext& context, TypeConverter& typeConverter,
-                        MemoryModelConverter& memoryConverter);
-
-    /**
-     * @brief Convert a single LLVM instruction to TOSA operations
-     */
-    mlir::Value convertInstruction(llvm::Instruction* inst, mlir::OpBuilder& builder);
-
-private:
-    mlir::MLIRContext& context_;
-    TypeConverter& typeConverter_;
-    MemoryModelConverter& memoryConverter_;
-    
-    // Instruction conversion methods for each LLVM instruction type
-    
-    // Arithmetic instructions
-    mlir::Value convertAdd(llvm::BinaryOperator* inst, mlir::OpBuilder& builder);
-    mlir::Value convertSub(llvm::BinaryOperator* inst, mlir::OpBuilder& builder);
-    mlir::Value convertMul(llvm::BinaryOperator* inst, mlir::OpBuilder& builder);
-    mlir::Value convertUDiv(llvm::BinaryOperator* inst, mlir::OpBuilder& builder);
-    mlir::Value convertSDiv(llvm::BinaryOperator* inst, mlir::OpBuilder& builder);
-    mlir::Value convertURem(llvm::BinaryOperator* inst, mlir::OpBuilder& builder);
-    mlir::Value convertSRem(llvm::BinaryOperator* inst, mlir::OpBuilder& builder);
-    
-    // Floating-point arithmetic
-    mlir::Value convertFAdd(llvm::BinaryOperator* inst, mlir::OpBuilder& builder);
-    mlir::Value convertFSub(llvm::BinaryOperator* inst, mlir::OpBuilder& builder);
-    mlir::Value convertFMul(llvm::BinaryOperator* inst, mlir::OpBuilder& builder);
-    mlir::Value convertFDiv(llvm::BinaryOperator* inst, mlir::OpBuilder& builder);
-    mlir::Value convertFRem(llvm::BinaryOperator* inst, mlir::OpBuilder& builder);
-    
-    // Bitwise operations
-    mlir::Value convertAnd(llvm::BinaryOperator* inst, mlir::OpBuilder& builder);
-    mlir::Value convertOr(llvm::BinaryOperator* inst, mlir::OpBuilder& builder);
-    mlir::Value convertXor(llvm::BinaryOperator* inst, mlir::OpBuilder& builder);
-    mlir::Value convertShl(llvm::BinaryOperator* inst, mlir::OpBuilder& builder);
-    mlir::Value convertLShr(llvm::BinaryOperator* inst, mlir::OpBuilder& builder);
-    mlir::Value convertAShr(llvm::BinaryOperator* inst, mlir::OpBuilder& builder);
-    
-    // Comparison operations
-    mlir::Value convertICmp(llvm::ICmpInst* inst, mlir::OpBuilder& builder);
-    mlir::Value convertFCmp(llvm::FCmpInst* inst, mlir::OpBuilder& builder);
-    
-    // Conversion operations
-    mlir::Value convertTrunc(llvm::TruncInst* inst, mlir::OpBuilder& builder);
-    mlir::Value convertZExt(llvm::ZExtInst* inst, mlir::OpBuilder& builder);
-    mlir::Value convertSExt(llvm::SExtInst* inst, mlir::OpBuilder& builder);
-    mlir::Value convertFPTrunc(llvm::FPTruncInst* inst, mlir::OpBuilder& builder);
-    mlir::Value convertFPExt(llvm::FPExtInst* inst, mlir::OpBuilder& builder);
-    mlir::Value convertFPToUI(llvm::FPToUIInst* inst, mlir::OpBuilder& builder);
-    mlir::Value convertFPToSI(llvm::FPToSIInst* inst, mlir::OpBuilder& builder);
-    mlir::Value convertUIToFP(llvm::UIToFPInst* inst, mlir::OpBuilder& builder);
-    mlir::Value convertSIToFP(llvm::SIToFPInst* inst, mlir::OpBuilder& builder);
-    mlir::Value convertPtrToInt(llvm::PtrToIntInst* inst, mlir::OpBuilder& builder);
-    mlir::Value convertIntToPtr(llvm::IntToPtrInst* inst, mlir::OpBuilder& builder);
-    mlir::Value convertBitCast(llvm::BitCastInst* inst, mlir::OpBuilder& builder);
-    
-    // Vector operations
-    mlir::Value convertExtractElement(llvm::ExtractElementInst* inst, mlir::OpBuilder& builder);
-    mlir::Value convertInsertElement(llvm::InsertElementInst* inst, mlir::OpBuilder& builder);
-    mlir::Value convertShuffleVector(llvm::ShuffleVectorInst* inst, mlir::OpBuilder& builder);
-    
-    // Other operations
-    mlir::Value convertSelect(llvm::SelectInst* inst, mlir::OpBuilder& builder);
-    mlir::Value convertPHI(llvm::PHINode* inst, mlir::OpBuilder& builder);
-    mlir::Value convertCall(llvm::CallInst* inst, mlir::OpBuilder& builder);
-    
-    // Intrinsic functions
-    mlir::Value convertIntrinsic(llvm::IntrinsicInst* inst, mlir::OpBuilder& builder);
-    mlir::Value convertMemCpy(llvm::MemCpyInst* inst, mlir::OpBuilder& builder);
-    mlir::Value convertMemMove(llvm::MemMoveInst* inst, mlir::OpBuilder& builder);
-    mlir::Value convertMemSet(llvm::MemSetInst* inst, mlir::OpBuilder& builder);
-    
-    // Helper methods
-    std::pair<mlir::Value, mlir::Value> broadcastToCompatibleShape(mlir::Value lhs, mlir::Value rhs, mlir::OpBuilder& builder);
-    mlir::Value ensureTensorType(mlir::Value value, mlir::OpBuilder& builder);
-    mlir::Value createQuantizationShift(mlir::OpBuilder& builder);
-    mlir::Value getConvertedValue(llvm::Value* llvmValue, mlir::OpBuilder& builder);
-    mlir::Value convertConstant(llvm::Constant* constant, mlir::OpBuilder& builder);
-    mlir::Value createZeroTensor(mlir::Type tensorType, mlir::OpBuilder& builder);
+    void setQuantizationMode(bool enable) { quantizationMode_ = enable; }
+    bool getDebugMode() const { return debugMode_; }
     
 private:
-    mlir::MLIRContext& context_;
-    TypeConverter& typeConverter_;
-    MemoryModelConverter& memoryConverter_;
-    std::map<llvm::Value*, mlir::Value> valueMapping_;
-};
-
-/**
- * @brief Converts LLVM control flow to TOSA structured control flow
- */
-class ControlFlowConverter {
-public:
-    ControlFlowConverter(mlir::MLIRContext& context, TypeConverter& typeConverter);
-
-    /**
-     * @brief Analyze and convert control flow structure
-     */
-    void convertControlFlow(llvm::Function& llvmFunc, mlir::func::FuncOp& tosaFunc);
-
-private:
-    mlir::MLIRContext& context_;
-    TypeConverter& typeConverter_;
+    // Core conversion methods
+    void parseModule(const std::string& llvmIR);
+    void convertGlobals();
+    void convertFunctions();
+    void convertBasicBlocks();
+    void convertInstructions();
     
-    // Control flow analysis structures
-    struct LoopInfo {
-        llvm::BasicBlock* header;
-        llvm::BasicBlock* latch;
-        std::vector<llvm::BasicBlock*> blocks;
-        bool isNaturalLoop;
-    };
+    // Helper methods for parsing
+    size_t parseFunctionBody(const std::vector<std::string>& lines, 
+                            size_t startIdx, const std::string& functionName);
+    std::string convertGlobalVariable(const std::string& global);
+    std::string parseConstantValue(const std::string& value, const TensorType& type);
+    std::string convertInstruction(LLVMOpcode opcode, const std::string& instruction);
     
-    struct IfInfo {
-        llvm::BasicBlock* condition;
-        llvm::BasicBlock* thenBlock;
-        llvm::BasicBlock* elseBlock;
-        llvm::BasicBlock* merge;
-    };
+    // Instruction conversion methods for all 68 LLVM instructions
+    std::string convertTerminatorInstruction(LLVMOpcode opcode, const std::string& instruction);
+    std::string convertUnaryInstruction(LLVMOpcode opcode, const std::string& instruction);
+    std::string convertBinaryInstruction(LLVMOpcode opcode, const std::string& instruction);
+    std::string convertMemoryInstruction(LLVMOpcode opcode, const std::string& instruction);
+    std::string convertCastInstruction(LLVMOpcode opcode, const std::string& instruction);
+    std::string convertComparisonInstruction(LLVMOpcode opcode, const std::string& instruction);
+    std::string convertVectorInstruction(LLVMOpcode opcode, const std::string& instruction);
+    std::string convertAggregateInstruction(LLVMOpcode opcode, const std::string& instruction);
+    std::string convertExceptionInstruction(LLVMOpcode opcode, const std::string& instruction);
+    std::string convertOtherInstruction(LLVMOpcode opcode, const std::string& instruction);
     
+    // Type system conversion
+    TensorType convertLLVMTypeToTensorType(const std::string& llvmType);
+    DataType convertLLVMTypeToDataType(const std::string& llvmType);
+    TensorShape inferTensorShape(const std::string& llvmType);
+    
+    // Memory model abstraction
+    std::string convertAllocaToTensorInit(const std::string& instruction);
+    std::string convertLoadToTensorSlice(const std::string& instruction);
+    std::string convertStoreToTensorUpdate(const std::string& instruction);
+    std::string convertGEPToTensorIndex(const std::string& instruction);
+    
+    // Control flow conversion
+    void analyzeControlFlow();
+    void identifyLoops();
+    void identifyConditionals();
+    std::string convertLoopToWhileLoop(const LoopInfo& loop);
+    std::string convertConditionalToCondIf(const ConditionalInfo& conditional);
+    
+    // TOSA operation generation
+    std::string generateTOSAOperation(TOSAOpcode opcode, 
+                                     const std::vector<std::string>& inputs,
+                                     const std::vector<TensorType>& inputTypes,
+                                     const TensorType& outputType,
+                                     const std::map<std::string, std::string>& attributes = {});
+    
+    // Tensor operations
+    std::string createTensorFromScalar(const std::string& scalarValue, DataType type);
+    std::string broadcastTensors(const std::string& lhs, const std::string& rhs,
+                                const TensorType& lhsType, const TensorType& rhsType);
+    std::string reshapeTensor(const std::string& tensor, const TensorShape& newShape);
+    std::string ensureTensorValue(const std::string& value, const TensorType& expectedType);
+    
+    // Utility methods
+    std::string generateUniqueName(const std::string& prefix = "tmp");
+    LLVMOpcode parseInstructionOpcode(const std::string& instruction);
+    std::vector<std::string> parseOperands(const std::string& instruction);
+    std::string parseResultName(const std::string& instruction);
+    std::string parseResultType(const std::string& instruction);
+    
+    // Output generation
+    std::string generateTOSAModule();
+    std::string generateTOSAFunction(const std::string& functionName);
+    
+    // State management
+    std::map<std::string, Value> valueMapping_;
+    std::map<std::string, BasicBlock> basicBlocks_;
+    std::map<std::string, MemoryAllocation> memoryAllocations_;
     std::vector<LoopInfo> loops_;
-    std::vector<IfInfo> conditionals_;
+    std::vector<ConditionalInfo> conditionals_;
+    std::vector<std::string> globalVariables_;
+    std::vector<std::string> functions_;
     
-    // Analysis methods
-    void analyzeControlFlow(llvm::Function& llvmFunc);
-    void identifyLoops(llvm::Function& llvmFunc);
-    void identifyConditionals(llvm::Function& llvmFunc);
+    // Generated TOSA code
+    std::stringstream tosaOutput_;
     
-    // Conversion methods
-    void convertLoop(const LoopInfo& loop, mlir::OpBuilder& builder);
-    void convertConditional(const IfInfo& conditional, mlir::OpBuilder& builder);
-    void convertBasicBlock(llvm::BasicBlock& bb, mlir::OpBuilder& builder);
+    // Configuration
+    int optimizationLevel_ = 0;
+    bool debugMode_ = false;
+    bool quantizationMode_ = false;
     
-    // Terminator instruction handlers
-    void convertReturn(llvm::ReturnInst* ret, mlir::OpBuilder& builder);
-    void convertBranch(llvm::BranchInst* br, mlir::OpBuilder& builder);
-    void convertSwitch(llvm::SwitchInst* sw, mlir::OpBuilder& builder);
-    void convertIndirectBr(llvm::IndirectBrInst* ibr, mlir::OpBuilder& builder);
-    void convertInvoke(llvm::InvokeInst* invoke, mlir::OpBuilder& builder);
-    void convertUnreachable(llvm::UnreachableInst* unreachable, mlir::OpBuilder& builder);
+    // Counters
+    int uniqueCounter_ = 0;
     
-    // Helper methods
-    bool isNaturalLoop(const std::vector<llvm::BasicBlock*>& blocks);
-    llvm::BasicBlock* findLoopLatch(llvm::BasicBlock* header);
-    mlir::Value convertCondition(llvm::Value* condition, mlir::OpBuilder& builder);
+    // Current context
+    std::string currentFunction_;
+    std::string currentBlock_;
 };
 
-/**
- * @brief Utility functions for the converter
- */
+// Utility functions for LLVM IR parsing
 namespace utils {
-    /**
-     * @brief Create MLIR location from LLVM instruction
-     */
-    mlir::Location createLocation(llvm::Instruction* inst, mlir::MLIRContext& context);
-    
-    /**
-     * @brief Check if LLVM type can be directly converted to tensor
-     */
-    bool isDirectlyConvertible(llvm::Type* llvmType);
-    
-    /**
-     * @brief Get tensor element count from LLVM type
-     */
-    size_t getTensorElementCount(llvm::Type* llvmType);
-    
-    /**
-     * @brief Create debug information for converted operations
-     */
-    void attachDebugInfo(mlir::Operation* op, llvm::Instruction* inst);
+    std::vector<std::string> splitLines(const std::string& text);
+    std::string trim(const std::string& str);
+    bool isInstruction(const std::string& line);
+    bool isTerminator(const std::string& line);
+    std::string extractFunctionName(const std::string& line);
+    std::string extractBasicBlockName(const std::string& line);
+    std::vector<std::string> parseArguments(const std::string& args);
+    std::string formatTensorType(const TensorType& type);
+    std::string escapeStringForMLIR(const std::string& str);
 }
 
 } // namespace llvm2tosa

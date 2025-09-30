@@ -997,6 +997,18 @@ void LLVMToTosaConverter::analyzeHighLevelPatterns() {
                              << " type: " << static_cast<int>(matrixOp.type) << std::endl;
                 }
             } else {
+                // Try instruction-based matrix multiplication detection as fallback
+                matrixOp = detectMatrixMultiplicationFromInstructions(funcName);
+                if (matrixOp.type != MatrixOperation::UNKNOWN) {
+                    detectedMatrixOps_[funcName] = matrixOp;
+                    FunctionSignature tensorSig = inferTensorSignature(funcName);
+                    tensorSignatures_[funcName] = tensorSig;
+                    
+                    if (debugMode_) {
+                        std::cout << "Detected matrix multiplication from instructions in " << funcName 
+                                 << " type: " << static_cast<int>(matrixOp.type) << std::endl;
+                    }
+                }
                 if (debugMode_) {
                     std::cout << "No recognizable operation found in " << funcName << std::endl;
                 }
@@ -1018,8 +1030,17 @@ NestedLoopPattern LLVMToTosaConverter::analyzeNestedLoops(const std::string& fun
     // Look for nested loop structure with PHI nodes
     std::vector<std::pair<std::string, int64_t>> loopInfo; // (block_name, bound)
     
+    if (debugMode_) {
+        std::cout << "Analyzing loops in function: " << functionName << std::endl;
+        std::cout << "Looking for blocks with prefix: " << funcPrefix << std::endl;
+    }
+    
     for (const auto& [blockName, block] : basicBlocks_) {
         if (blockName.find(funcPrefix) == 0) {
+            if (debugMode_) {
+                std::cout << "  Checking block: " << blockName << std::endl;
+            }
+            
             // Check for loop header pattern (contains PHI and comparison)
             bool hasPhiNode = false;
             bool hasComparison = false;
@@ -1035,6 +1056,9 @@ NestedLoopPattern LLVMToTosaConverter::analyzeNestedLoops(const std::string& fun
                     if (std::regex_search(instr, match, phiRegex)) {
                         inductionVar = match[1].str();
                     }
+                    if (debugMode_) {
+                        std::cout << "    Found PHI node: " << instr << " -> " << inductionVar << std::endl;
+                    }
                 }
                 if (instr.find("icmp slt") != std::string::npos) {
                     hasComparison = true;
@@ -1044,10 +1068,16 @@ NestedLoopPattern LLVMToTosaConverter::analyzeNestedLoops(const std::string& fun
                     if (std::regex_search(instr, match, boundRegex)) {
                         bound = std::stoll(match[1].str());
                     } else {
-                        // Check for parametric bound (e.g., %n)
-                        if (instr.find("%n") != std::string::npos) {
+                        // Check for parametric bound (e.g., %M, %N, %K)
+                        if (instr.find("%M") != std::string::npos || 
+                            instr.find("%N") != std::string::npos || 
+                            instr.find("%K") != std::string::npos || 
+                            instr.find("%n") != std::string::npos) {
                             bound = -1; // indicate dynamic bound
                         }
+                    }
+                    if (debugMode_) {
+                        std::cout << "    Found comparison: " << instr << " -> bound=" << bound << std::endl;
                     }
                 }
             }
@@ -1055,12 +1085,37 @@ NestedLoopPattern LLVMToTosaConverter::analyzeNestedLoops(const std::string& fun
             if (hasPhiNode && hasComparison && (bound > 0 || bound == -1)) {
                 loopInfo.push_back({block.name, bound});
                 pattern.inductionVars.push_back(inductionVar);
+                if (debugMode_) {
+                    std::cout << "    DETECTED LOOP: " << block.name << " bound=" << bound << " var=" << inductionVar << std::endl;
+                }
             }
         }
     }
     
+    if (debugMode_) {
+        std::cout << "Total loops found: " << loopInfo.size() << std::endl;
+    }
+    
     // Sort by loop nesting order (outer first, then inner)
-    if (loopInfo.size() == 2) {
+    if (loopInfo.size() == 3) {
+        // 3D matrix-matrix multiplication pattern (i, j, k loops)
+        // Extract bounds in correct order
+        pattern.bounds = {loopInfo[0].second, loopInfo[1].second, loopInfo[2].second};
+        pattern.isMatrixLoop = true;
+        
+        // Find the loop body (contains the actual computation)
+        for (const auto& [blockName, block] : basicBlocks_) {
+            if (blockName.find(funcPrefix) == 0 && 
+                blockName.find("body") != std::string::npos) {
+                pattern.bodyBlock = block.name;
+                break;
+            }
+        }
+        
+        if (debugMode_) {
+            std::cout << "Found 3D matrix-matrix multiplication pattern" << std::endl;
+        }
+    } else if (loopInfo.size() == 2) {
         // 2D matrix operation pattern
         // Determine which is outer and which is inner based on block names
         if (loopInfo[0].first.find("outer") != std::string::npos) {
@@ -1120,10 +1175,20 @@ MatrixOperation LLVMToTosaConverter::detectMatrixOperation(const NestedLoopPatte
         return matrixOp;
     }
     
-    // First try to detect matrix-vector multiplication (A*x = y)
-    matrixOp = detectMatrixVectorMul(loopPattern);
-    if (matrixOp.type != MatrixOperation::UNKNOWN) {
-        return matrixOp;
+    // Check for 3D loops (matrix-matrix multiplication)
+    if (loopPattern.bounds.size() == 3) {
+        matrixOp = detectMatrixMatrixMul(loopPattern);
+        if (matrixOp.type != MatrixOperation::UNKNOWN) {
+            return matrixOp;
+        }
+    }
+    
+    // Check for 2D loops (matrix-vector multiplication)
+    if (loopPattern.bounds.size() == 2) {
+        matrixOp = detectMatrixVectorMul(loopPattern);
+        if (matrixOp.type != MatrixOperation::UNKNOWN) {
+            return matrixOp;
+        }
     }
     
     // Find the loop body block and analyze its operations
@@ -1207,6 +1272,244 @@ MatrixOperation LLVMToTosaConverter::detectMatrixOperation(const NestedLoopPatte
                 std::cout << "  Matrix shape: [" << rows << ", " << cols << "]" << std::endl;
                 std::cout << "  Vector shape: [" << cols << "]" << std::endl;
             }
+        }
+        
+        matrixOp.inputTensors = {"A", "B"}; // Parameter names
+    }
+    
+    return matrixOp;
+}
+
+MatrixOperation LLVMToTosaConverter::detectMatrixMultiplicationFromInstructions(const std::string& functionName) {
+    MatrixOperation matrixOp;
+    matrixOp.type = MatrixOperation::UNKNOWN;
+    
+    // Search all basic blocks for matrix multiplication patterns
+    bool hasMatrixA_LinearIndexing = false;
+    bool hasMatrixB_LinearIndexing = false;
+    bool hasMatrixC_Store = false;
+    bool hasMatrixA_Access = false;
+    bool hasMatrixB_Access = false;
+    bool hasMultiplication = false;
+    bool hasAccumulation = false;
+    bool hasThreeVariables = false;
+    
+    std::string funcPrefix = functionName + ".";
+    
+    // Look for specific matrix multiplication instruction patterns
+    for (const auto& [blockName, block] : basicBlocks_) {
+        if (blockName.find(funcPrefix) == 0) {
+            for (const auto& instr : block.instructions) {
+                // Pattern 1: i*K + k (matrix A indexing)
+                if (instr.find("mul nsw") != std::string::npos && 
+                    instr.find("%i.val") != std::string::npos && instr.find("%K") != std::string::npos) {
+                    hasMatrixA_LinearIndexing = true;
+                    if (debugMode_) {
+                        std::cout << "  Found matrix A indexing pattern: " << instr << std::endl;
+                    }
+                }
+                
+                // Pattern 2: k*N + j (matrix B indexing)
+                if (instr.find("mul nsw") != std::string::npos && 
+                    instr.find("%k.val") != std::string::npos && instr.find("%N") != std::string::npos) {
+                    hasMatrixB_LinearIndexing = true;
+                    if (debugMode_) {
+                        std::cout << "  Found matrix B indexing pattern: " << instr << std::endl;
+                    }
+                }
+                
+                // Pattern 3: Matrix A access
+                if (instr.find("getelementptr") != std::string::npos && instr.find("%A") != std::string::npos) {
+                    hasMatrixA_Access = true;
+                }
+                
+                // Pattern 4: Matrix B access
+                if (instr.find("getelementptr") != std::string::npos && instr.find("%B") != std::string::npos) {
+                    hasMatrixB_Access = true;
+                }
+                
+                // Pattern 5: Matrix C store
+                if (instr.find("store float") != std::string::npos && instr.find("%C") != std::string::npos) {
+                    hasMatrixC_Store = true;
+                }
+                
+                // Pattern 6: Floating point multiplication
+                if (instr.find("fmul float") != std::string::npos) {
+                    hasMultiplication = true;
+                }
+                
+                // Pattern 7: Accumulation with sum
+                if (instr.find("fadd float") != std::string::npos && instr.find("sum") != std::string::npos) {
+                    hasAccumulation = true;
+                }
+                
+                // Pattern 8: Three loop variables (i, j, k)
+                if (instr.find("%i.val") != std::string::npos && 
+                    instr.find("%j.val") != std::string::npos && 
+                    instr.find("%k.val") != std::string::npos) {
+                    hasThreeVariables = true;
+                }
+            }
+        }
+    }
+    
+    // If we found the classic matrix multiplication pattern
+    if (hasMatrixA_LinearIndexing && hasMatrixB_LinearIndexing && 
+        hasMatrixA_Access && hasMatrixB_Access && hasMatrixC_Store &&
+        hasMultiplication && hasAccumulation) {
+        
+        if (debugMode_) {
+            std::cout << "  Detected MATRIX-MATRIX MULTIPLICATION from instruction analysis!" << std::endl;
+        }
+        
+        matrixOp.type = MatrixOperation::MATRIX_MATRIX_MUL;
+        matrixOp.operation = "matmul";
+        matrixOp.isDynamic = true; // Assume dynamic since we see %M, %N, %K parameters
+        
+        // Set up dynamic tensor shapes for C = A * B
+        matrixOp.inputShapes = {
+            TensorShape({-1, -1}),  // A: M x K  
+            TensorShape({-1, -1})   // B: K x N
+        };
+        matrixOp.outputShape = TensorShape({-1, -1});  // C: M x N
+        matrixOp.inputTensors = {"A", "B"};
+    }
+    
+    return matrixOp;
+}
+
+MatrixOperation LLVMToTosaConverter::detectMatrixMatrixMul(const NestedLoopPattern& loopPattern) {
+    MatrixOperation matrixOp;
+    matrixOp.type = MatrixOperation::UNKNOWN;
+    
+    if (!loopPattern.isMatrixLoop || loopPattern.bodyBlock.empty() || loopPattern.bounds.size() != 3) {
+        return matrixOp;
+    }
+    
+    // Find the loop body block and analyze three-nested matrix multiplication
+    std::string bodyKey = currentFunction_ + "." + loopPattern.bodyBlock;
+    auto it = basicBlocks_.find(bodyKey);
+    if (it == basicBlocks_.end()) {
+        return matrixOp;
+    }
+    
+    const BasicBlock& bodyBlock = it->second;
+    
+    // Check for matrix-matrix multiplication pattern:
+    // - Three nested loops (i < M, j < N, k < K)
+    // - Matrix A access: A[i][k] (i*K + k indexing)
+    // - Matrix B access: B[k][j] (k*N + j indexing)  
+    // - Accumulation: sum += A[i][k] * B[k][j]
+    // - Result store: C[i][j] = sum
+    
+    bool hasMatrixA_Access = false;
+    bool hasMatrixB_Access = false;
+    bool hasMatrixC_Store = false;
+    bool hasMultiplication = false;
+    bool hasAccumulation = false;
+    bool hasLinearIndexingA = false;
+    bool hasLinearIndexingB = false;
+    
+    if (debugMode_) {
+        std::cout << "Analyzing matrix-matrix multiplication pattern..." << std::endl;
+        for (const auto& instr : bodyBlock.instructions) {
+            std::cout << "  Instruction: " << instr << std::endl;
+        }
+    }
+    
+    for (const auto& instr : bodyBlock.instructions) {
+        // Look for linear indexing patterns for matrix A: i*K + k
+        if (instr.find("mul nsw") != std::string::npos && 
+            instr.find("%i.val") != std::string::npos && instr.find("%K") != std::string::npos) {
+            hasLinearIndexingA = true;
+            if (debugMode_) {
+                std::cout << "  Found matrix A linear indexing: " << instr << std::endl;
+            }
+        }
+        
+        // Look for linear indexing patterns for matrix B: k*N + j  
+        if (instr.find("mul nsw") != std::string::npos && 
+            instr.find("%k.val") != std::string::npos && instr.find("%N") != std::string::npos) {
+            hasLinearIndexingB = true;
+            if (debugMode_) {
+                std::cout << "  Found matrix B linear indexing: " << instr << std::endl;
+            }
+        }
+        
+        // Look for matrix A access
+        if (instr.find("getelementptr") != std::string::npos && instr.find("%A") != std::string::npos) {
+            hasMatrixA_Access = true;
+            if (debugMode_) {
+                std::cout << "  Found matrix A access: " << instr << std::endl;
+            }
+        }
+        
+        // Look for matrix B access
+        if (instr.find("getelementptr") != std::string::npos && instr.find("%B") != std::string::npos) {
+            hasMatrixB_Access = true;
+            if (debugMode_) {
+                std::cout << "  Found matrix B access: " << instr << std::endl;
+            }
+        }
+        
+        // Look for multiplication
+        if (instr.find("fmul float") != std::string::npos) {
+            hasMultiplication = true;
+            if (debugMode_) {
+                std::cout << "  Found multiplication: " << instr << std::endl;
+            }
+        }
+        
+        // Look for accumulation
+        if (instr.find("fadd float") != std::string::npos && instr.find("sum") != std::string::npos) {
+            hasAccumulation = true;
+            if (debugMode_) {
+                std::cout << "  Found accumulation: " << instr << std::endl;
+            }
+        }
+    }
+    
+    // Also check for result store in latch blocks (C[i][j] = sum)
+    for (const auto& [blockName, block] : basicBlocks_) {
+        if (blockName.find(currentFunction_ + ".j.loop.latch") != std::string::npos) {
+            for (const auto& instr : block.instructions) {
+                if (instr.find("store float") != std::string::npos && instr.find("%C") != std::string::npos) {
+                    hasMatrixC_Store = true;
+                    if (debugMode_) {
+                        std::cout << "  Found matrix C store: " << instr << std::endl;
+                    }
+                }
+            }
+        }
+    }
+    
+    if (hasLinearIndexingA && hasLinearIndexingB && hasMatrixA_Access && 
+        hasMatrixB_Access && hasMatrixC_Store && hasMultiplication && hasAccumulation) {
+        
+        if (debugMode_) {
+            std::cout << "  Detected MATRIX-MATRIX MULTIPLICATION pattern!" << std::endl;
+            std::cout << "  Matrix A shape: [" << loopPattern.bounds[0] << ", " << loopPattern.bounds[2] << "]" << std::endl;
+            std::cout << "  Matrix B shape: [" << loopPattern.bounds[2] << ", " << loopPattern.bounds[1] << "]" << std::endl;
+            std::cout << "  Result C shape: [" << loopPattern.bounds[0] << ", " << loopPattern.bounds[1] << "]" << std::endl;
+        }
+        
+        matrixOp.type = MatrixOperation::MATRIX_MATRIX_MUL;
+        matrixOp.operation = "matmul";
+        matrixOp.isDynamic = (loopPattern.bounds[0] == -1 || loopPattern.bounds[1] == -1 || loopPattern.bounds[2] == -1);
+        
+        // Set up tensor shapes for matrix multiplication A * B = C
+        if (matrixOp.isDynamic) {
+            matrixOp.inputShapes = {
+                TensorShape({-1, -1}),  // A: M x K  
+                TensorShape({-1, -1})   // B: K x N
+            };
+            matrixOp.outputShape = TensorShape({-1, -1});  // C: M x N
+        } else {
+            matrixOp.inputShapes = {
+                TensorShape({loopPattern.bounds[0], loopPattern.bounds[2]}),  // A: M x K
+                TensorShape({loopPattern.bounds[2], loopPattern.bounds[1]})   // B: K x N
+            };
+            matrixOp.outputShape = TensorShape({loopPattern.bounds[0], loopPattern.bounds[1]});  // C: M x N
         }
         
         matrixOp.inputTensors = {"A", "B"}; // Parameter names
@@ -1654,6 +1957,17 @@ FunctionSignature LLVMToTosaConverter::inferTensorSignature(const std::string& f
             // Matrix-vector multiplication returns a vector
             sig.returnType = TensorType(matrixOp.outputShape, DataType::FLOAT32);
             sig.isVoidReturn = false;
+        } else if (matrixOp.type == MatrixOperation::MATRIX_MATRIX_MUL) {
+            // Create tensor parameter types for matrix-matrix multiplication: matrix A, matrix B -> matrix C
+            for (size_t i = 0; i < matrixOp.inputShapes.size(); ++i) {
+                TensorType tensorType(matrixOp.inputShapes[i], DataType::FLOAT32);
+                std::string paramName = matrixOp.inputTensors[i];
+                sig.parameters.push_back({paramName, tensorType});
+            }
+            
+            // Matrix-matrix multiplication returns a matrix
+            sig.returnType = TensorType(matrixOp.outputShape, DataType::FLOAT32);
+            sig.isVoidReturn = false;
         }
     }
     
@@ -1749,6 +2063,19 @@ std::string LLVMToTosaConverter::generateHighLevelTOSA(const MatrixOperation& ma
         }
     } else if (matrixOp.type == MatrixOperation::MATRIX_VECTOR_MUL) {
         ss << "    // Matrix-vector multiplication: A * x = y" << std::endl;
+        ss << "    %result = tosa.matmul %" << sig.parameters[0].first << ", %" << sig.parameters[1].first;
+        ss << " : (" << utils::formatTensorType(sig.parameters[0].second) << ", ";
+        ss << utils::formatTensorType(sig.parameters[1].second) << ") -> ";
+        ss << utils::formatTensorType(sig.returnType) << std::endl;
+        
+        if (!sig.isVoidReturn) {
+            ss << "    return %result : ";
+            ss << utils::formatTensorType(sig.returnType) << std::endl;
+        } else {
+            ss << "    func.return" << std::endl;
+        }
+    } else if (matrixOp.type == MatrixOperation::MATRIX_MATRIX_MUL) {
+        ss << "    // Matrix-matrix multiplication: A * B = C" << std::endl;
         ss << "    %result = tosa.matmul %" << sig.parameters[0].first << ", %" << sig.parameters[1].first;
         ss << " : (" << utils::formatTensorType(sig.parameters[0].second) << ", ";
         ss << utils::formatTensorType(sig.parameters[1].second) << ") -> ";

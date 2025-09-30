@@ -140,6 +140,7 @@ struct MatrixOperation {
         MATRIX_VECTOR_ADD, 
         MATRIX_MATRIX_ADD, 
         MATRIX_VECTOR_MUL,  // matrix-vector multiplication (A*x = y)
+        MATRIX_MATRIX_MUL,  // matrix-matrix multiplication (A*B = C)
         VECTOR_SCALAR_MUL,
         VECTOR_VECTOR_ADD,
         AXPY_OPERATION,     // a*x + y pattern
@@ -242,6 +243,8 @@ private:
     void analyzeHighLevelPatterns();
     NestedLoopPattern analyzeNestedLoops(const std::string& functionName);
     MatrixOperation detectMatrixOperation(const NestedLoopPattern& loopPattern);
+    MatrixOperation detectMatrixMultiplicationFromInstructions(const std::string& functionName);
+    MatrixOperation detectMatrixMatrixMul(const NestedLoopPattern& loopPattern);
     MatrixOperation detectMatrixVectorMul(const NestedLoopPattern& loopPattern);
     MatrixOperation detectVectorOperation(const NestedLoopPattern& loopPattern);
     MatrixOperation detectAXPYPattern(const NestedLoopPattern& loopPattern);

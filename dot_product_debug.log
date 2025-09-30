@@ -1,0 +1,24 @@
+=== LLVM2TOSA Complete Converter ===
+Supports all 68 LLVM IR instructions -> 66 TOSA operations
+Parsing function: dot_product
+Analyzing high-level patterns...
+Analyzing function: dot_product
+Basic blocks for this function:
+  Block: dot_product.entry (2 instructions)
+  Block: dot_product.loop.body (7 instructions)
+  Block: dot_product.loop.exit (1 instructions)
+  Block: dot_product.loop.exit.early (1 instructions)
+  Block: dot_product.loop.header (4 instructions)
+  Block: dot_product.loop.latch (2 instructions)
+Found 1D vector loop, dynamic=1
+Found vector loop pattern
+Analyzing vector loop body for patterns...
+  Instruction: %a.addr = getelementptr inbounds float, float* %a, i32 %i.val
+  Instruction: %a.val = load float, float* %a.addr
+  Instruction: %b.addr = getelementptr inbounds float, float* %b, i32 %i.val
+  Instruction: %b.val = load float, float* %b.addr
+  Instruction: %mul.val = fmul float %a.val, %b.val
+  Instruction: %new.sum = fadd float %sum.val, %mul.val
+  Instruction: br label %loop.latch
+  Found scalar multiplication: %mul.val = fmul float %a.val, %b.val
+  Found addition: %new.sum = fadd float %sum.val, %mul.val

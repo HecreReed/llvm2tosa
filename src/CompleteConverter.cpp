@@ -1239,6 +1239,15 @@ MatrixOperation LLVMToTosaConverter::detectVectorOperation(const NestedLoopPatte
         return vectorOp;
     }
     
+    // Check for dot product pattern: sum += a[i] * b[i]
+    if (debugMode_) std::cout << "Checking for dot product pattern..." << std::endl;
+    vectorOp = detectDotProductPattern(loopPattern);
+    if (vectorOp.type != MatrixOperation::UNKNOWN) {
+        if (debugMode_) std::cout << "Dot product pattern detected!" << std::endl;
+        return vectorOp;
+    }
+    if (debugMode_) std::cout << "No dot product pattern found." << std::endl;
+    
     // Check for other vector patterns
     bool hasVectorAccess = false;
     bool hasArithmetic = false;
@@ -1308,8 +1317,9 @@ MatrixOperation LLVMToTosaConverter::detectAXPYPattern(const NestedLoopPattern& 
     bool hasStore = false;
     
     for (const auto& instr : bodyBlock.instructions) {
-        // Check for scalar multiplication (a * x[i])
-        if (instr.find("fmul float %a") != std::string::npos) {
+        // Check for scalar multiplication (a * x[i]) - needs scalar parameter %a and vector element
+        if (instr.find("fmul float %a, %x.val") != std::string::npos ||
+            instr.find("fmul float %x.val, %a") != std::string::npos) {
             hasScalarParam = true;
             hasMultiplication = true;
             if (debugMode_) std::cout << "  Found scalar multiplication: " << instr << std::endl;
@@ -1374,6 +1384,106 @@ MatrixOperation LLVMToTosaConverter::detectAXPYPattern(const NestedLoopPattern& 
     }
     
     return axpyOp;
+}
+
+MatrixOperation LLVMToTosaConverter::detectDotProductPattern(const NestedLoopPattern& loopPattern) {
+    if (debugMode_) std::cout << "  Entering detectDotProductPattern" << std::endl;
+    MatrixOperation dotOp;
+    dotOp.type = MatrixOperation::UNKNOWN;
+    
+    if (!loopPattern.isVectorLoop || loopPattern.bodyBlock.empty()) {
+        if (debugMode_) std::cout << "  Not a vector loop or empty body" << std::endl;
+        return dotOp;
+    }
+    
+    // Find the loop body block
+    std::string bodyKey = currentFunction_ + "." + loopPattern.bodyBlock;
+    if (debugMode_) std::cout << "  Looking for body block: " << bodyKey << std::endl;
+    auto it = basicBlocks_.find(bodyKey);
+    if (it == basicBlocks_.end()) {
+        if (debugMode_) std::cout << "  Body block not found" << std::endl;
+        return dotOp;
+    }
+    
+    const BasicBlock& bodyBlock = it->second;
+    if (debugMode_) std::cout << "  Found body block with " << bodyBlock.instructions.size() << " instructions" << std::endl;
+    
+    // Simple pattern matching for dot product
+    bool hasVectorA = false, hasVectorB = false;
+    bool hasMultiplication = false, hasAccumulation = false;
+    
+    // Check body instructions
+    for (const auto& instr : bodyBlock.instructions) {
+        if (instr.find("getelementptr") != std::string::npos) {
+            if (instr.find(" %a,") != std::string::npos) hasVectorA = true;
+            if (instr.find(" %b,") != std::string::npos) hasVectorB = true;
+        }
+        if (instr.find("fmul float %a.val, %b.val") != std::string::npos) {
+            hasMultiplication = true;
+        }
+        if (instr.find("fadd float %sum.val") != std::string::npos) {
+            hasAccumulation = true;
+        }
+    }
+    
+    // Check for accumulator PHI in any loop-related block (simplified check)
+    bool hasAccumulatorPhi = false;
+    if (debugMode_) std::cout << "  Searching all basic blocks for accumulator PHI..." << std::endl;
+    
+    // Search all basic blocks for the accumulator PHI node
+    for (const auto& blockPair : basicBlocks_) {
+        const std::string& blockName = blockPair.first;
+        const BasicBlock& block = blockPair.second;
+        
+        // Only check blocks belonging to this function
+        if (blockName.find(currentFunction_ + ".") == 0) {
+            for (const auto& instr : block.instructions) {
+                // Look for sum accumulator PHI: %sum.val = phi float [ 0.0, ...
+                if (instr.find("phi float") != std::string::npos && 
+                    instr.find("sum.val") != std::string::npos &&
+                    instr.find("0.0") != std::string::npos) {
+                    hasAccumulatorPhi = true;
+                    if (debugMode_) std::cout << "  Found accumulator PHI in " << blockName << ": " << instr << std::endl;
+                    break;
+                }
+            }
+            if (hasAccumulatorPhi) break;
+        }
+    }
+    
+    if (debugMode_) {
+        std::cout << "  hasVectorA: " << hasVectorA << std::endl;
+        std::cout << "  hasVectorB: " << hasVectorB << std::endl;  
+        std::cout << "  hasMultiplication: " << hasMultiplication << std::endl;
+        std::cout << "  hasAccumulation: " << hasAccumulation << std::endl;
+        std::cout << "  hasAccumulatorPhi: " << hasAccumulatorPhi << std::endl;
+    }
+    
+    // If all components are present, it's a dot product
+    if (hasVectorA && hasVectorB && hasMultiplication && hasAccumulation && hasAccumulatorPhi) {
+        dotOp.type = MatrixOperation::DOT_PRODUCT;
+        dotOp.operation = "dot_product";
+        dotOp.isDynamic = loopPattern.isDynamicSize;
+        
+        // Set up tensor shapes
+        if (loopPattern.isDynamicSize) {
+            dotOp.inputShapes.push_back(TensorShape({-1}));    // vector a (dynamic)
+            dotOp.inputShapes.push_back(TensorShape({-1}));    // vector b (dynamic)  
+            dotOp.outputShape = TensorShape({});               // scalar result
+        } else if (!loopPattern.bounds.empty()) {
+            int64_t size = loopPattern.bounds[0];
+            dotOp.inputShapes.push_back(TensorShape({size}));  // vector a
+            dotOp.inputShapes.push_back(TensorShape({size}));  // vector b
+            dotOp.outputShape = TensorShape({});               // scalar result
+        }
+        
+        dotOp.inputTensors = {"a", "b"};
+        
+        if (debugMode_) std::cout << "  Detected DOT PRODUCT pattern!" << std::endl;
+    }
+    
+    if (debugMode_) std::cout << "  Exiting detectDotProductPattern" << std::endl;
+    return dotOp;
 }
 
 FunctionSignature LLVMToTosaConverter::inferTensorSignature(const std::string& functionName) {
@@ -1474,6 +1584,30 @@ std::string LLVMToTosaConverter::generateHighLevelTOSA(const MatrixOperation& ma
         
         if (!sig.isVoidReturn) {
             ss << "    return %add_result : ";
+            ss << utils::formatTensorType(sig.returnType) << std::endl;
+        } else {
+            ss << "    func.return" << std::endl;
+        }
+    } else if (matrixOp.type == MatrixOperation::DOT_PRODUCT) {
+        ss << "    // Dot product operation: sum(a[i] * b[i])" << std::endl;
+        ss << "    // 1. Element-wise multiplication of vectors a and b" << std::endl;
+        ss << "    %mul_result = tosa.mul %" << sig.parameters[0].first << ", %" << sig.parameters[1].first;
+        ss << " : (" << utils::formatTensorType(sig.parameters[0].second) << ", ";
+        ss << utils::formatTensorType(sig.parameters[1].second) << ") -> ";
+        ss << utils::formatTensorType(sig.parameters[0].second) << std::endl;
+        
+        ss << "    // 2. Sum all elements to get scalar result" << std::endl;
+        ss << "    %dot_result = tosa.reduce_sum %mul_result";
+        if (matrixOp.isDynamic) {
+            ss << " {axis = 0 : i32}";
+        } else {
+            ss << " {axis = 0 : i32}";
+        }
+        ss << " : (" << utils::formatTensorType(sig.parameters[0].second) << ") -> ";
+        ss << utils::formatTensorType(sig.returnType) << std::endl;
+        
+        if (!sig.isVoidReturn) {
+            ss << "    return %dot_result : ";
             ss << utils::formatTensorType(sig.returnType) << std::endl;
         } else {
             ss << "    func.return" << std::endl;

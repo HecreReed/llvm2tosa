@@ -177,6 +177,7 @@ struct MatrixOperation {
         VECTOR_SCALAR_MUL,
         VECTOR_VECTOR_ADD,
         AXPY_OPERATION,     // a*x + y pattern
+        DOT_PRODUCT,        // sum(a[i] * b[i]) pattern
         ELEMENT_WISE_OP, 
         UNKNOWN 
     };
@@ -277,6 +278,7 @@ private:
     MatrixOperation detectMatrixOperation(const NestedLoopPattern& loopPattern);
     MatrixOperation detectVectorOperation(const NestedLoopPattern& loopPattern);
     MatrixOperation detectAXPYPattern(const NestedLoopPattern& loopPattern);
+    MatrixOperation detectDotProductPattern(const NestedLoopPattern& loopPattern);
     FunctionSignature inferTensorSignature(const std::string& functionName);
     bool isMatrixVectorBroadcast(const NestedLoopPattern& pattern);
     bool isVectorOperation(const NestedLoopPattern& pattern);

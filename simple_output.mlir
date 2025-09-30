@@ -3,10 +3,10 @@
 // Supports all 68 LLVM instructions -> 66 TOSA operations
 
 module {
-func.func @simple_matrix_add(%A: tensor<2x3xi32>, %B: tensor<3xi32>) -> tensor<2x3xi32> {
-    // Matrix-vector broadcast addition
-    %B_result = tosa.add %A, %B : (tensor<2x3xi32>, tensor<3xi32>) -> tensor<2x3xi32>
-    return %B_result : tensor<2x3xi32>
-  }
+func.func @simple_add() -> () {
+  // Basic block: entry
+  %result = tosa.add scalar_0, scalar_1 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+  result_2 = tosa.add scalar_3, %result : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+}
 
 }

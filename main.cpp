@@ -9,7 +9,7 @@ int runComprehensiveTests(); // Forward declaration
 
 int main(int argc, char* argv[]) {
     std::cout << "=== LLVM2TOSA Complete Converter ===" << std::endl;
-    std::cout << "Supports all 68 LLVM IR instructions -> 66 TOSA operations" << std::endl;
+    std::cout << "Supports all 68 LLVM IR instructions -> TOSA operations" << std::endl;
     
     if (argc < 2) {
         std::cout << "Usage: " << argv[0] << " <input.ll> [output.mlir]" << std::endl;

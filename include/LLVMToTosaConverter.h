@@ -39,7 +39,7 @@ enum class LLVMOpcode {
     ExtractValue, InsertValue, LandingPad, Freeze
 };
 
-// Complete TOSA operation set enumeration (66 operations)
+// Complete TOSA operation set enumeration (all operations)
 enum class TOSAOpcode {
     // Tensor Operators (10)
     ArgMax, AvgPool2d, Conv2d, Conv3d, DepthwiseConv2d,
@@ -48,26 +48,26 @@ enum class TOSAOpcode {
     // Activation Functions (4)
     Clamp, Erf, Sigmoid, Tanh,
     
-    // Elementwise Binary (18)
+    // Elementwise Binary (20)
     Add, ArithmeticRightShift, BitwiseAnd, BitwiseOr, BitwiseXor,
     IntDiv, LogicalAnd, LogicalLeftShift, LogicalRightShift,
     LogicalOr, LogicalXor, Maximum, Minimum, Mul, Pow, Sub, Table,
+    Equal, Greater, GreaterEqual,
     
-    // Elementwise Unary (13)
+    // Elementwise Unary (15)
     Abs, BitwiseNot, Ceil, Clz, Cos, Exp, Floor, Log,
     LogicalNot, Negate, Reciprocal, Rsqrt, Sin,
+    FNegate, SquareRoot,
     
     // Selection (1)
     Select,
     
-    // Comparison (3)
-    Equal, Greater, GreaterEqual,
-    
     // Reduction (6)
     ReduceAll, ReduceAny, ReduceMax, ReduceMin, ReduceProduct, ReduceSum,
     
-    // Data Layout (8)
+    // Data Layout (9)
     Concat, Pad, Reshape, Reverse, Slice, Tile, Transpose,
+    ExtractElement, InsertElement,
     
     // Scatter/Gather (2)
     Gather, Scatter,

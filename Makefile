@@ -175,19 +175,6 @@ llvm2tosa/fast:
 .PHONY : llvm2tosa/fast
 
 #=============================================================================
-# Target rules for targets named converter_demo
-
-# Build rule for target.
-converter_demo: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 converter_demo
-.PHONY : converter_demo
-
-# fast build rule for target.
-converter_demo/fast:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/converter_demo.dir/build.make CMakeFiles/converter_demo.dir/build
-.PHONY : converter_demo/fast
-
-#=============================================================================
 # Target rules for targets named unit_tests
 
 # Build rule for target.
@@ -199,30 +186,6 @@ unit_tests: cmake_check_build_system
 unit_tests/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/unit_tests.dir/build.make CMakeFiles/unit_tests.dir/build
 .PHONY : unit_tests/fast
-
-examples/simple_converter_demo.o: examples/simple_converter_demo.cpp.o
-.PHONY : examples/simple_converter_demo.o
-
-# target to build an object file
-examples/simple_converter_demo.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/converter_demo.dir/build.make CMakeFiles/converter_demo.dir/examples/simple_converter_demo.cpp.o
-.PHONY : examples/simple_converter_demo.cpp.o
-
-examples/simple_converter_demo.i: examples/simple_converter_demo.cpp.i
-.PHONY : examples/simple_converter_demo.i
-
-# target to preprocess a source file
-examples/simple_converter_demo.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/converter_demo.dir/build.make CMakeFiles/converter_demo.dir/examples/simple_converter_demo.cpp.i
-.PHONY : examples/simple_converter_demo.cpp.i
-
-examples/simple_converter_demo.s: examples/simple_converter_demo.cpp.s
-.PHONY : examples/simple_converter_demo.s
-
-# target to generate assembly for a file
-examples/simple_converter_demo.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/converter_demo.dir/build.make CMakeFiles/converter_demo.dir/examples/simple_converter_demo.cpp.s
-.PHONY : examples/simple_converter_demo.cpp.s
 
 main.o: main.cpp.o
 .PHONY : main.o
@@ -254,7 +217,6 @@ src/CompleteConverter.o: src/CompleteConverter.cpp.o
 # target to build an object file
 src/CompleteConverter.cpp.o:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/llvm2tosa.dir/build.make CMakeFiles/llvm2tosa.dir/src/CompleteConverter.cpp.o
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/converter_demo.dir/build.make CMakeFiles/converter_demo.dir/src/CompleteConverter.cpp.o
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/unit_tests.dir/build.make CMakeFiles/unit_tests.dir/src/CompleteConverter.cpp.o
 .PHONY : src/CompleteConverter.cpp.o
 
@@ -264,7 +226,6 @@ src/CompleteConverter.i: src/CompleteConverter.cpp.i
 # target to preprocess a source file
 src/CompleteConverter.cpp.i:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/llvm2tosa.dir/build.make CMakeFiles/llvm2tosa.dir/src/CompleteConverter.cpp.i
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/converter_demo.dir/build.make CMakeFiles/converter_demo.dir/src/CompleteConverter.cpp.i
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/unit_tests.dir/build.make CMakeFiles/unit_tests.dir/src/CompleteConverter.cpp.i
 .PHONY : src/CompleteConverter.cpp.i
 
@@ -274,7 +235,6 @@ src/CompleteConverter.s: src/CompleteConverter.cpp.s
 # target to generate assembly for a file
 src/CompleteConverter.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/llvm2tosa.dir/build.make CMakeFiles/llvm2tosa.dir/src/CompleteConverter.cpp.s
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/converter_demo.dir/build.make CMakeFiles/converter_demo.dir/src/CompleteConverter.cpp.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/unit_tests.dir/build.make CMakeFiles/unit_tests.dir/src/CompleteConverter.cpp.s
 .PHONY : src/CompleteConverter.cpp.s
 
@@ -314,12 +274,8 @@ help:
 	@echo "... install/strip"
 	@echo "... list_install_components"
 	@echo "... rebuild_cache"
-	@echo "... converter_demo"
 	@echo "... llvm2tosa"
 	@echo "... unit_tests"
-	@echo "... examples/simple_converter_demo.o"
-	@echo "... examples/simple_converter_demo.i"
-	@echo "... examples/simple_converter_demo.s"
 	@echo "... main.o"
 	@echo "... main.i"
 	@echo "... main.s"

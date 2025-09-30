@@ -1,5 +1,4 @@
 /Users/mac/project/llvm/CMakeFiles/llvm2tosa.dir
-/Users/mac/project/llvm/CMakeFiles/converter_demo.dir
 /Users/mac/project/llvm/CMakeFiles/unit_tests.dir
 /Users/mac/project/llvm/CMakeFiles/edit_cache.dir
 /Users/mac/project/llvm/CMakeFiles/rebuild_cache.dir

@@ -171,21 +171,32 @@ struct MemoryAllocation {
 
 // High-level pattern recognition structures
 struct MatrixOperation {
-    enum Type { MATRIX_VECTOR_ADD, MATRIX_MATRIX_ADD, ELEMENT_WISE_OP, UNKNOWN };
+    enum Type { 
+        MATRIX_VECTOR_ADD, 
+        MATRIX_MATRIX_ADD, 
+        VECTOR_SCALAR_MUL,
+        VECTOR_VECTOR_ADD,
+        AXPY_OPERATION,     // a*x + y pattern
+        ELEMENT_WISE_OP, 
+        UNKNOWN 
+    };
     Type type;
     std::vector<std::string> inputTensors;
     std::vector<TensorShape> inputShapes;
     TensorShape outputShape;
-    std::string operation; // "add", "mul", etc.
+    std::string operation; // "add", "mul", "axpy", etc.
     bool hasBroadcast = false;
+    bool isDynamic = false; // for dynamic sized vectors
 };
 
 struct NestedLoopPattern {
-    std::vector<std::string> inductionVars; // [i, j] for 2D loops
-    std::vector<int64_t> bounds; // [rows, cols] 
+    std::vector<std::string> inductionVars; // [i] for 1D, [i, j] for 2D loops
+    std::vector<int64_t> bounds; // [n] for 1D, [rows, cols] for 2D
     std::vector<std::string> loopBlocks;
     std::string bodyBlock;
     bool isMatrixLoop = false;
+    bool isVectorLoop = false;  // for 1D vector operations
+    bool isDynamicSize = false; // when size comes from parameter
     MatrixOperation detectedOp;
 };
 
@@ -264,9 +275,13 @@ private:
     void analyzeHighLevelPatterns();
     NestedLoopPattern analyzeNestedLoops(const std::string& functionName);
     MatrixOperation detectMatrixOperation(const NestedLoopPattern& loopPattern);
+    MatrixOperation detectVectorOperation(const NestedLoopPattern& loopPattern);
+    MatrixOperation detectAXPYPattern(const NestedLoopPattern& loopPattern);
     FunctionSignature inferTensorSignature(const std::string& functionName);
     bool isMatrixVectorBroadcast(const NestedLoopPattern& pattern);
+    bool isVectorOperation(const NestedLoopPattern& pattern);
     TensorShape inferShapeFromLoopBounds(const std::vector<int64_t>& bounds);
+    TensorShape inferDynamicVectorShape();
     std::string generateHighLevelTOSA(const MatrixOperation& matrixOp, const std::string& funcName);
     
     // TOSA operation generation

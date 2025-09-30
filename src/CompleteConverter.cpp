@@ -66,11 +66,22 @@ std::vector<std::string> parseArguments(const std::string& args) {
 std::string formatTensorType(const TensorType& type) {
     std::stringstream ss;
     ss << "tensor<";
-    for (size_t i = 0; i < type.shape.dimensions.size(); ++i) {
-        if (i > 0) ss << "x";
-        ss << type.shape.dimensions[i];
+    
+    if (type.shape.dimensions.empty()) {
+        // Scalar tensor
+        ss << "";
+    } else {
+        for (size_t i = 0; i < type.shape.dimensions.size(); ++i) {
+            if (i > 0) ss << "x";
+            
+            if (type.shape.dimensions[i] == -1) {
+                ss << "?"; // dynamic dimension
+            } else {
+                ss << type.shape.dimensions[i];
+            }
+        }
+        ss << "x";
     }
-    ss << "x";
     
     switch (type.elementType) {
         case DataType::BOOL: ss << "i1"; break;
@@ -954,16 +965,26 @@ void LLVMToTosaConverter::analyzeHighLevelPatterns() {
         
         // Detect nested loop patterns
         NestedLoopPattern loopPattern = analyzeNestedLoops(funcName);
-        if (loopPattern.isMatrixLoop) {
+        if (loopPattern.isMatrixLoop || loopPattern.isVectorLoop) {
             detectedLoopPatterns_[funcName] = loopPattern;
             
             if (debugMode_) {
-                std::cout << "Found matrix loop pattern with bounds: [" 
-                         << loopPattern.bounds[0] << ", " << loopPattern.bounds[1] << "]" << std::endl;
+                if (loopPattern.isVectorLoop) {
+                    std::cout << "Found vector loop pattern" << std::endl;
+                } else {
+                    std::cout << "Found matrix loop pattern with bounds: [" 
+                             << loopPattern.bounds[0] << ", " << loopPattern.bounds[1] << "]" << std::endl;
+                }
             }
             
-            // Detect matrix operations within the loop
-            MatrixOperation matrixOp = detectMatrixOperation(loopPattern);
+            // Detect matrix or vector operations within the loop
+            MatrixOperation matrixOp;
+            if (loopPattern.isVectorLoop) {
+                matrixOp = detectVectorOperation(loopPattern);
+            } else {
+                matrixOp = detectMatrixOperation(loopPattern);
+            }
+            
             if (matrixOp.type != MatrixOperation::UNKNOWN) {
                 detectedMatrixOps_[funcName] = matrixOp;
                 
@@ -972,11 +993,12 @@ void LLVMToTosaConverter::analyzeHighLevelPatterns() {
                 tensorSignatures_[funcName] = tensorSig;
                 
                 if (debugMode_) {
-                    std::cout << "Detected matrix operation in " << funcName << std::endl;
+                    std::cout << "Detected operation in " << funcName 
+                             << " type: " << static_cast<int>(matrixOp.type) << std::endl;
                 }
             } else {
                 if (debugMode_) {
-                    std::cout << "No recognizable matrix operation found in " << funcName << std::endl;
+                    std::cout << "No recognizable operation found in " << funcName << std::endl;
                 }
             }
         } else {
@@ -1016,16 +1038,21 @@ NestedLoopPattern LLVMToTosaConverter::analyzeNestedLoops(const std::string& fun
                 }
                 if (instr.find("icmp slt") != std::string::npos) {
                     hasComparison = true;
-                    // Extract loop bound
+                    // Extract loop bound - could be constant or parameter
                     std::regex boundRegex(R"(icmp slt.*?,\s*(\d+))");
                     std::smatch match;
                     if (std::regex_search(instr, match, boundRegex)) {
                         bound = std::stoll(match[1].str());
+                    } else {
+                        // Check for parametric bound (e.g., %n)
+                        if (instr.find("%n") != std::string::npos) {
+                            bound = -1; // indicate dynamic bound
+                        }
                     }
                 }
             }
             
-            if (hasPhiNode && hasComparison && bound > 0) {
+            if (hasPhiNode && hasComparison && (bound > 0 || bound == -1)) {
                 loopInfo.push_back({block.name, bound});
                 pattern.inductionVars.push_back(inductionVar);
             }
@@ -1034,6 +1061,7 @@ NestedLoopPattern LLVMToTosaConverter::analyzeNestedLoops(const std::string& fun
     
     // Sort by loop nesting order (outer first, then inner)
     if (loopInfo.size() == 2) {
+        // 2D matrix operation pattern
         // Determine which is outer and which is inner based on block names
         if (loopInfo[0].first.find("outer") != std::string::npos) {
             // Already in correct order
@@ -1056,6 +1084,28 @@ NestedLoopPattern LLVMToTosaConverter::analyzeNestedLoops(const std::string& fun
                 pattern.bodyBlock = block.name;
                 break;
             }
+        }
+    } else if (loopInfo.size() == 1) {
+        // 1D vector operation pattern
+        pattern.bounds = {loopInfo[0].second};
+        pattern.isVectorLoop = true;
+        
+        // Check if size is dynamic (bound = -1 indicates parametric bound)
+        if (loopInfo[0].second == -1) {
+            pattern.isDynamicSize = true;
+        }
+        
+        // Find the loop body
+        for (const auto& [blockName, block] : basicBlocks_) {
+            if (blockName.find(funcPrefix) == 0 && 
+                blockName.find("body") != std::string::npos) {
+                pattern.bodyBlock = block.name;
+                break;
+            }
+        }
+        
+        if (debugMode_) {
+            std::cout << "Found 1D vector loop, dynamic=" << pattern.isDynamicSize << std::endl;
         }
     }
     
@@ -1159,18 +1209,185 @@ MatrixOperation LLVMToTosaConverter::detectMatrixOperation(const NestedLoopPatte
     return matrixOp;
 }
 
+MatrixOperation LLVMToTosaConverter::detectVectorOperation(const NestedLoopPattern& loopPattern) {
+    MatrixOperation vectorOp;
+    vectorOp.type = MatrixOperation::UNKNOWN;
+    
+    if (!loopPattern.isVectorLoop || loopPattern.bodyBlock.empty()) {
+        return vectorOp;
+    }
+    
+    // Find the loop body block and analyze its operations
+    std::string bodyKey = currentFunction_ + "." + loopPattern.bodyBlock;
+    auto it = basicBlocks_.find(bodyKey);
+    if (it == basicBlocks_.end()) {
+        return vectorOp;
+    }
+    
+    const BasicBlock& bodyBlock = it->second;
+    
+    if (debugMode_) {
+        std::cout << "Analyzing vector loop body for patterns..." << std::endl;
+        for (const auto& instr : bodyBlock.instructions) {
+            std::cout << "  Instruction: " << instr << std::endl;
+        }
+    }
+    
+    // Check for AXPY pattern: y[i] = a * x[i] + y[i]
+    vectorOp = detectAXPYPattern(loopPattern);
+    if (vectorOp.type != MatrixOperation::UNKNOWN) {
+        return vectorOp;
+    }
+    
+    // Check for other vector patterns
+    bool hasVectorAccess = false;
+    bool hasArithmetic = false;
+    
+    for (const auto& instr : bodyBlock.instructions) {
+        // Check for vector element access pattern
+        if (instr.find("getelementptr") != std::string::npos &&
+            !loopPattern.inductionVars.empty()) {
+            std::string inductionVar = loopPattern.inductionVars[0];
+            if (instr.find(inductionVar) != std::string::npos) {
+                hasVectorAccess = true;
+                if (debugMode_) std::cout << "  Found vector access pattern" << std::endl;
+            }
+        }
+        
+        // Check for arithmetic operations
+        if (instr.find("fadd") != std::string::npos || 
+            instr.find("fmul") != std::string::npos ||
+            instr.find("add") != std::string::npos ||
+            instr.find("mul") != std::string::npos) {
+            hasArithmetic = true;
+            if (debugMode_) std::cout << "  Found arithmetic operation" << std::endl;
+        }
+    }
+    
+    if (hasVectorAccess && hasArithmetic) {
+        vectorOp.type = MatrixOperation::ELEMENT_WISE_OP;
+        vectorOp.operation = "element_wise";
+        vectorOp.isDynamic = loopPattern.isDynamicSize;
+        
+        // Set up tensor shapes
+        if (loopPattern.isDynamicSize) {
+            vectorOp.inputShapes.push_back(TensorShape({-1})); // dynamic size
+            vectorOp.outputShape = TensorShape({-1});
+        } else if (!loopPattern.bounds.empty()) {
+            vectorOp.inputShapes.push_back(TensorShape({loopPattern.bounds[0]}));
+            vectorOp.outputShape = TensorShape({loopPattern.bounds[0]});
+        }
+    }
+    
+    return vectorOp;
+}
+
+MatrixOperation LLVMToTosaConverter::detectAXPYPattern(const NestedLoopPattern& loopPattern) {
+    MatrixOperation axpyOp;
+    axpyOp.type = MatrixOperation::UNKNOWN;
+    
+    if (!loopPattern.isVectorLoop || loopPattern.bodyBlock.empty()) {
+        return axpyOp;
+    }
+    
+    // Find the loop body block
+    std::string bodyKey = currentFunction_ + "." + loopPattern.bodyBlock;
+    auto it = basicBlocks_.find(bodyKey);
+    if (it == basicBlocks_.end()) {
+        return axpyOp;
+    }
+    
+    const BasicBlock& bodyBlock = it->second;
+    
+    // Check for AXPY pattern components
+    bool hasScalarParam = false;
+    bool hasVectorXAccess = false;
+    bool hasVectorYAccess = false;
+    bool hasMultiplication = false;
+    bool hasAddition = false;
+    bool hasStore = false;
+    
+    for (const auto& instr : bodyBlock.instructions) {
+        // Check for scalar multiplication (a * x[i])
+        if (instr.find("fmul float %a") != std::string::npos) {
+            hasScalarParam = true;
+            hasMultiplication = true;
+            if (debugMode_) std::cout << "  Found scalar multiplication: " << instr << std::endl;
+        }
+        
+        // Check for vector x access
+        if (instr.find("getelementptr") != std::string::npos && 
+            instr.find(" %x,") != std::string::npos) {
+            hasVectorXAccess = true;
+            if (debugMode_) std::cout << "  Found vector x access: " << instr << std::endl;
+        }
+        
+        // Check for vector y access
+        if (instr.find("getelementptr") != std::string::npos && 
+            instr.find(" %y,") != std::string::npos) {
+            hasVectorYAccess = true;
+            if (debugMode_) std::cout << "  Found vector y access: " << instr << std::endl;
+        }
+        
+        // Check for addition (mul_result + y[i])
+        if (instr.find("fadd float") != std::string::npos) {
+            hasAddition = true;
+            if (debugMode_) std::cout << "  Found addition: " << instr << std::endl;
+        }
+        
+        // Check for store back to y
+        if (instr.find("store float") != std::string::npos && 
+            instr.find("%y.addr") != std::string::npos) {
+            hasStore = true;
+            if (debugMode_) std::cout << "  Found store to y: " << instr << std::endl;
+        }
+    }
+    
+    // If all AXPY components are present
+    if (hasScalarParam && hasVectorXAccess && hasVectorYAccess && 
+        hasMultiplication && hasAddition && hasStore) {
+        
+        axpyOp.type = MatrixOperation::AXPY_OPERATION;
+        axpyOp.operation = "axpy";
+        axpyOp.hasBroadcast = true; // scalar broadcasts to vector
+        axpyOp.isDynamic = loopPattern.isDynamicSize;
+        
+        if (debugMode_) {
+            std::cout << "  Detected AXPY pattern: a*x + y" << std::endl;
+        }
+        
+        // Set up tensor shapes for AXPY: scalar, vector, vector -> vector
+        if (loopPattern.isDynamicSize) {
+            axpyOp.inputShapes.push_back(TensorShape({}));      // scalar a
+            axpyOp.inputShapes.push_back(TensorShape({-1}));    // vector x (dynamic)
+            axpyOp.inputShapes.push_back(TensorShape({-1}));    // vector y (dynamic)
+            axpyOp.outputShape = TensorShape({-1});             // result vector (dynamic)
+        } else if (!loopPattern.bounds.empty()) {
+            int64_t size = loopPattern.bounds[0];
+            axpyOp.inputShapes.push_back(TensorShape({}));      // scalar a
+            axpyOp.inputShapes.push_back(TensorShape({size}));  // vector x
+            axpyOp.inputShapes.push_back(TensorShape({size}));  // vector y
+            axpyOp.outputShape = TensorShape({size});           // result vector
+        }
+        
+        axpyOp.inputTensors = {"a", "x", "y"};
+    }
+    
+    return axpyOp;
+}
+
 FunctionSignature LLVMToTosaConverter::inferTensorSignature(const std::string& functionName) {
     FunctionSignature sig;
     sig.name = functionName;
     sig.isVoidReturn = true;
     
-    // Look for the detected matrix operation to infer parameter types
+    // Look for the detected operation to infer parameter types
     auto matrixIt = detectedMatrixOps_.find(functionName);
     if (matrixIt != detectedMatrixOps_.end()) {
         const MatrixOperation& matrixOp = matrixIt->second;
         
         if (matrixOp.type == MatrixOperation::MATRIX_VECTOR_ADD) {
-            // Create tensor parameter types
+            // Create tensor parameter types for matrix-vector broadcast
             for (size_t i = 0; i < matrixOp.inputShapes.size(); ++i) {
                 TensorType tensorType(matrixOp.inputShapes[i], DataType::INT32);
                 std::string paramName = matrixOp.inputTensors[i];
@@ -1179,6 +1396,18 @@ FunctionSignature LLVMToTosaConverter::inferTensorSignature(const std::string& f
             
             // Set return type (for functional style)
             sig.returnType = TensorType(matrixOp.outputShape, DataType::INT32);
+            sig.isVoidReturn = false;
+        } else if (matrixOp.type == MatrixOperation::AXPY_OPERATION) {
+            // Create tensor parameter types for AXPY: scalar, vector, vector
+            for (size_t i = 0; i < matrixOp.inputShapes.size(); ++i) {
+                DataType dataType = (i == 0) ? DataType::FLOAT32 : DataType::FLOAT32; // all float for AXPY
+                TensorType tensorType(matrixOp.inputShapes[i], dataType);
+                std::string paramName = matrixOp.inputTensors[i];
+                sig.parameters.push_back({paramName, tensorType});
+            }
+            
+            // AXPY returns the modified vector
+            sig.returnType = TensorType(matrixOp.outputShape, DataType::FLOAT32);
             sig.isVoidReturn = false;
         }
     }
@@ -1225,6 +1454,26 @@ std::string LLVMToTosaConverter::generateHighLevelTOSA(const MatrixOperation& ma
         
         if (!sig.isVoidReturn) {
             ss << "    return %" << sig.parameters.back().first << "_result : ";
+            ss << utils::formatTensorType(sig.returnType) << std::endl;
+        } else {
+            ss << "    func.return" << std::endl;
+        }
+    } else if (matrixOp.type == MatrixOperation::AXPY_OPERATION) {
+        ss << "    // AXPY operation: a*x + y" << std::endl;
+        ss << "    // 1. Scalar a broadcasts and multiplies with vector x" << std::endl;
+        ss << "    %mul_result = tosa.mul %" << sig.parameters[1].first << ", %" << sig.parameters[0].first;
+        ss << " : (" << utils::formatTensorType(sig.parameters[1].second) << ", ";
+        ss << utils::formatTensorType(sig.parameters[0].second) << ") -> ";
+        ss << utils::formatTensorType(sig.parameters[1].second) << std::endl;
+        
+        ss << "    // 2. Add the result to vector y" << std::endl;
+        ss << "    %add_result = tosa.add %mul_result, %" << sig.parameters[2].first;
+        ss << " : (" << utils::formatTensorType(sig.parameters[1].second) << ", ";
+        ss << utils::formatTensorType(sig.parameters[2].second) << ") -> ";
+        ss << utils::formatTensorType(sig.returnType) << std::endl;
+        
+        if (!sig.isVoidReturn) {
+            ss << "    return %add_result : ";
             ss << utils::formatTensorType(sig.returnType) << std::endl;
         } else {
             ss << "    func.return" << std::endl;

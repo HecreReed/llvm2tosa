@@ -1,0 +1,12 @@
+# LLVM to TOSA Converter
+
+llvm-project/
+build/
+.DS_Store
+*.o
+*.so
+*.dylib
+converter
+test_converter
+realistic_converter
+llvm-to-tosa-converter

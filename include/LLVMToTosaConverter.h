@@ -39,59 +39,24 @@ enum class LLVMOpcode {
     ExtractValue, InsertValue, LandingPad, Freeze
 };
 
-// Complete TOSA operation set enumeration (all operations)
+// Complete TOSA operation set enumeration (official operators)
 enum class TOSAOpcode {
-    // Tensor Operators (10)
-    ArgMax, AvgPool2d, Conv2d, Conv3d, DepthwiseConv2d,
-    FFT2d, MatMul, MaxPool2d, RFFT2d, TransposeConv2d,
-    
-    // Activation Functions (4)
-    Clamp, Erf, Sigmoid, Tanh,
-    
-    // Elementwise Binary (20)
-    Add, ArithmeticRightShift, BitwiseAnd, BitwiseOr, BitwiseXor,
-    IntDiv, LogicalAnd, LogicalLeftShift, LogicalRightShift,
-    LogicalOr, LogicalXor, Maximum, Minimum, Mul, Pow, Sub, Table,
-    Equal, Greater, GreaterEqual,
-    
-    // Elementwise Unary (15)
-    Abs, BitwiseNot, Ceil, Clz, Cos, Exp, Floor, Log,
-    LogicalNot, Negate, Reciprocal, Rsqrt, Sin,
-    FNegate, SquareRoot,
-    
-    // Selection (1)
-    Select,
-    
-    // Reduction (6)
-    ReduceAll, ReduceAny, ReduceMax, ReduceMin, ReduceProduct, ReduceSum,
-    
-    // Data Layout (9)
-    Concat, Pad, Reshape, Reverse, Slice, Tile, Transpose,
-    ExtractElement, InsertElement,
-    
-    // Scatter/Gather (2)
-    Gather, Scatter,
-    
-    // Image Operations (1)
-    Resize,
-    
-    // Type Conversion (2)
-    Cast, Rescale,
-    
-    // Data Nodes (2)
-    Const, Identity,
-    
-    // Custom (1)
-    Custom,
-    
-    // Control Flow (2)
-    CondIf, WhileLoop,
-    
-    // Utility Operations (5)
-    ApplyScale, Yield, Variable, VariableRead, VariableWrite,
-    
-    // Shape Operations (1)
-    ConstShape
+    // Based on official TOSA specification operation definitions
+    Abs, Add, ApplyScale, ArgMax, ArithmeticRightShift,
+    AvgPool2d, BitwiseAnd, BitwiseNot, BitwiseOr, BitwiseXor,
+    Cast, Ceil, Clamp, Clz, Concat, Const, ConstShape,
+    Conv2d, Conv3d, Cos, Custom, DepthwiseConv2d,
+    Equal, Erf, Exp, FFT2d, Floor, Gather,
+    Greater, GreaterEqual, Identity, CondIf, IntDiv,
+    Log, LogicalAnd, LogicalLeftShift, LogicalNot,
+    LogicalOr, LogicalRightShift, LogicalXor,
+    MatMul, MaxPool2d, Maximum, Minimum, Mul, Negate,
+    Pad, Pow, RFFT2d, Reciprocal, ReduceAll, ReduceAny,
+    ReduceMax, ReduceMin, ReduceProduct, ReduceSum,
+    Rescale, Reshape, Resize, Reverse, Rsqrt,
+    Scatter, Select, Sigmoid, Sin, Slice, Sub,
+    Table, Tanh, Tile, TransposeConv2d, Transpose,
+    Variable, VariableRead, VariableWrite, WhileLoop, Yield
 };
 
 // Data types for conversion
@@ -174,6 +139,7 @@ struct MatrixOperation {
     enum Type { 
         MATRIX_VECTOR_ADD, 
         MATRIX_MATRIX_ADD, 
+        MATRIX_VECTOR_MUL,  // matrix-vector multiplication (A*x = y)
         VECTOR_SCALAR_MUL,
         VECTOR_VECTOR_ADD,
         AXPY_OPERATION,     // a*x + y pattern
@@ -276,6 +242,7 @@ private:
     void analyzeHighLevelPatterns();
     NestedLoopPattern analyzeNestedLoops(const std::string& functionName);
     MatrixOperation detectMatrixOperation(const NestedLoopPattern& loopPattern);
+    MatrixOperation detectMatrixVectorMul(const NestedLoopPattern& loopPattern);
     MatrixOperation detectVectorOperation(const NestedLoopPattern& loopPattern);
     MatrixOperation detectAXPYPattern(const NestedLoopPattern& loopPattern);
     MatrixOperation detectDotProductPattern(const NestedLoopPattern& loopPattern);

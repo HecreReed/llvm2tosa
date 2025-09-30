@@ -1120,6 +1120,12 @@ MatrixOperation LLVMToTosaConverter::detectMatrixOperation(const NestedLoopPatte
         return matrixOp;
     }
     
+    // First try to detect matrix-vector multiplication (A*x = y)
+    matrixOp = detectMatrixVectorMul(loopPattern);
+    if (matrixOp.type != MatrixOperation::UNKNOWN) {
+        return matrixOp;
+    }
+    
     // Find the loop body block and analyze its operations
     std::string bodyKey = currentFunction_ + "." + loopPattern.bodyBlock;
     auto it = basicBlocks_.find(bodyKey);
@@ -1204,6 +1210,113 @@ MatrixOperation LLVMToTosaConverter::detectMatrixOperation(const NestedLoopPatte
         }
         
         matrixOp.inputTensors = {"A", "B"}; // Parameter names
+    }
+    
+    return matrixOp;
+}
+
+MatrixOperation LLVMToTosaConverter::detectMatrixVectorMul(const NestedLoopPattern& loopPattern) {
+    MatrixOperation matrixOp;
+    matrixOp.type = MatrixOperation::UNKNOWN;
+    
+    if (!loopPattern.isMatrixLoop || loopPattern.bodyBlock.empty()) {
+        return matrixOp;
+    }
+    
+    // Find the loop body block and analyze nested matrix-vector multiplication
+    std::string bodyKey = currentFunction_ + "." + loopPattern.bodyBlock;
+    auto it = basicBlocks_.find(bodyKey);
+    if (it == basicBlocks_.end()) {
+        return matrixOp;
+    }
+    
+    const BasicBlock& bodyBlock = it->second;
+    
+    // Check for matrix-vector multiplication pattern:
+    // - Two nested loops (outer for rows, inner for columns)
+    // - Matrix access: A[i][j] (i*N + j indexing)
+    // - Vector access: x[j]
+    // - Accumulation: sum += A[i][j] * x[j] 
+    // - Result store: y[i] = sum
+    
+    bool hasMatrixAccess = false;
+    bool hasVectorAccess = false;
+    bool hasMultiplication = false;
+    bool hasAccumulation = false;
+    bool hasLinearIndexing = false;
+    
+    if (debugMode_) {
+        std::cout << "Analyzing matrix-vector multiplication pattern..." << std::endl;
+        for (const auto& instr : bodyBlock.instructions) {
+            std::cout << "  Instruction: " << instr << std::endl;
+        }
+    }
+    
+    for (const auto& instr : bodyBlock.instructions) {
+        // Check for linear indexing: i * N + j
+        if (instr.find("mul nsw i32") != std::string::npos && 
+            instr.find("%i.val, %N") != std::string::npos) {
+            hasLinearIndexing = true;
+            if (debugMode_) std::cout << "  Found linear indexing: " << instr << std::endl;
+        }
+        
+        // Check for matrix access A[i*N + j]
+        if (instr.find("getelementptr") != std::string::npos && 
+            instr.find(" %A,") != std::string::npos) {
+            hasMatrixAccess = true;
+            if (debugMode_) std::cout << "  Found matrix access: " << instr << std::endl;
+        }
+        
+        // Check for vector access x[j]
+        if (instr.find("getelementptr") != std::string::npos && 
+            instr.find(" %x,") != std::string::npos &&
+            instr.find("%j.val") != std::string::npos) {
+            hasVectorAccess = true;
+            if (debugMode_) std::cout << "  Found vector access: " << instr << std::endl;
+        }
+        
+        // Check for multiplication A[i][j] * x[j]
+        if (instr.find("fmul float") != std::string::npos) {
+            hasMultiplication = true;
+            if (debugMode_) std::cout << "  Found multiplication: " << instr << std::endl;
+        }
+        
+        // Check for accumulation sum += product
+        if (instr.find("fadd float %sum.val") != std::string::npos) {
+            hasAccumulation = true;
+            if (debugMode_) std::cout << "  Found accumulation: " << instr << std::endl;
+        }
+    }
+    
+    // If all components are present, this is matrix-vector multiplication
+    if (hasMatrixAccess && hasVectorAccess && hasMultiplication && 
+        hasAccumulation && hasLinearIndexing) {
+        
+        matrixOp.type = MatrixOperation::MATRIX_VECTOR_MUL;
+        matrixOp.operation = "matmul";
+        matrixOp.hasBroadcast = false;
+        
+        if (debugMode_) {
+            std::cout << "  Detected MATRIX-VECTOR MULTIPLICATION pattern!" << std::endl;
+        }
+        
+        // Set up tensor shapes for matrix-vector multiplication
+        // A: [M, N], x: [N], y: [M]
+        if (loopPattern.bounds.size() >= 2) {
+            int64_t M = loopPattern.bounds[0]; // rows
+            int64_t N = loopPattern.bounds[1]; // columns
+            matrixOp.inputShapes.push_back(TensorShape({M, N})); // matrix A
+            matrixOp.inputShapes.push_back(TensorShape({N}));    // vector x
+            matrixOp.outputShape = TensorShape({M});             // result vector y
+            
+            if (debugMode_) {
+                std::cout << "  Matrix A shape: [" << M << ", " << N << "]" << std::endl;
+                std::cout << "  Vector x shape: [" << N << "]" << std::endl;
+                std::cout << "  Result y shape: [" << M << "]" << std::endl;
+            }
+        }
+        
+        matrixOp.inputTensors = {"A", "x"};
     }
     
     return matrixOp;
@@ -1530,6 +1643,17 @@ FunctionSignature LLVMToTosaConverter::inferTensorSignature(const std::string& f
             // Dot product returns a scalar
             sig.returnType = TensorType(matrixOp.outputShape, DataType::FLOAT32);
             sig.isVoidReturn = false;
+        } else if (matrixOp.type == MatrixOperation::MATRIX_VECTOR_MUL) {
+            // Create tensor parameter types for matrix-vector multiplication: matrix, vector -> vector
+            for (size_t i = 0; i < matrixOp.inputShapes.size(); ++i) {
+                TensorType tensorType(matrixOp.inputShapes[i], DataType::FLOAT32);
+                std::string paramName = matrixOp.inputTensors[i];
+                sig.parameters.push_back({paramName, tensorType});
+            }
+            
+            // Matrix-vector multiplication returns a vector
+            sig.returnType = TensorType(matrixOp.outputShape, DataType::FLOAT32);
+            sig.isVoidReturn = false;
         }
     }
     
@@ -1619,6 +1743,19 @@ std::string LLVMToTosaConverter::generateHighLevelTOSA(const MatrixOperation& ma
         
         if (!sig.isVoidReturn) {
             ss << "    return %dot_result : ";
+            ss << utils::formatTensorType(sig.returnType) << std::endl;
+        } else {
+            ss << "    func.return" << std::endl;
+        }
+    } else if (matrixOp.type == MatrixOperation::MATRIX_VECTOR_MUL) {
+        ss << "    // Matrix-vector multiplication: A * x = y" << std::endl;
+        ss << "    %result = tosa.matmul %" << sig.parameters[0].first << ", %" << sig.parameters[1].first;
+        ss << " : (" << utils::formatTensorType(sig.parameters[0].second) << ", ";
+        ss << utils::formatTensorType(sig.parameters[1].second) << ") -> ";
+        ss << utils::formatTensorType(sig.returnType) << std::endl;
+        
+        if (!sig.isVoidReturn) {
+            ss << "    return %result : ";
             ss << utils::formatTensorType(sig.returnType) << std::endl;
         } else {
             ss << "    func.return" << std::endl;

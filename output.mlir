@@ -3,65 +3,236 @@
 // Supports all 68 LLVM instructions -> 66 TOSA operations
 
 module {
-func.func @blocked_matmul() -> () {
-  // Basic block: compute
-  %i_k_offset = tosa.mul scalar_0, scalar_1 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  %a_idx = tosa.add %i_k_offset, scalar_2 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  // GEP: %a_ptr = getelementptr float, float* %A, i32 %a_idx
-  // Load: %a_val = load float, float* %a_ptr
-  %k_j_offset = tosa.mul scalar_3, scalar_4 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  %b_idx = tosa.add %k_j_offset, scalar_5 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  // GEP: %b_ptr = getelementptr float, float* %B, i32 %b_idx
-  // Load: %b_val = load float, float* %b_ptr
-  %prod = tosa.mul scalar_6, scalar_7 : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
-  %new_sum = tosa.add scalar_8, %prod : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
+func.func @test_abs() -> () {
   // Basic block: entry
-  // Basic block: exit
-  func.return
-  // Basic block: inner_i
-  %i = tosa.add scalar_11, scalar_12 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  %i_limit = tosa.add scalar_13, scalar_14 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  %i_cond = tosa.equal scalar_15, %i : (tensor<1xi1>, tensor<1xi1>) -> tensor<1xi1>
-  result_16 = tosa.add scalar_17, scalar_18 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  // Basic block: inner_i_latch
-  %i_next = tosa.add %i, scalar_19 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  // Basic block: inner_j
-  %j = tosa.add scalar_21, scalar_22 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  %j_limit = tosa.add scalar_23, scalar_24 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  %j_cond = tosa.equal scalar_15, %j : (tensor<1xi1>, tensor<1xi1>) -> tensor<1xi1>
-  result_25 = tosa.add scalar_26, scalar_27 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  // Basic block: inner_j_latch
-  %i_j_offset = tosa.mul %i, scalar_28 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  %c_idx = tosa.add %i_j_offset, %j : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  // GEP: %c_ptr = getelementptr float, float* %C, i32 %c_idx
-  result_29 = tosa.add scalar_30, scalar_31 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  %j_next = tosa.add %j, scalar_19 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  // Basic block: inner_k
-  %k = tosa.add scalar_33, scalar_34 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  %sum = tosa.add %new_sum, scalar_35 : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
-  %k_limit = tosa.add scalar_36, scalar_37 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  %k_cond = tosa.equal scalar_15, %k : (tensor<1xi1>, tensor<1xi1>) -> tensor<1xi1>
-  result_38 = tosa.add scalar_39, scalar_40 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  // Basic block: inner_k_latch
-  %k_next = tosa.add %k, scalar_19 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  // Basic block: outer_i
-  %bi = tosa.add scalar_42, scalar_43 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  %bi_cond = tosa.equal scalar_15, %bi : (tensor<1xi1>, tensor<1xi1>) -> tensor<1xi1>
-  result_44 = tosa.add scalar_45, scalar_46 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  // Basic block: outer_i_latch
-  %bi_next = tosa.add %bi, scalar_47 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  // Basic block: outer_j
-  %bj = tosa.add scalar_49, scalar_50 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  %bj_cond = tosa.equal scalar_15, %bj : (tensor<1xi1>, tensor<1xi1>) -> tensor<1xi1>
-  result_51 = tosa.add scalar_52, scalar_53 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  // Basic block: outer_j_latch
-  %bj_next = tosa.add %bj, scalar_54 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  // Basic block: outer_k
-  %bk = tosa.add scalar_56, scalar_57 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  %bk_cond = tosa.equal scalar_15, %bk : (tensor<1xi1>, tensor<1xi1>) -> tensor<1xi1>
-  result_58 = tosa.add scalar_59, scalar_60 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
-  // Basic block: outer_k_latch
-  %bk_next = tosa.add %bk, scalar_61 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+  %is_negative = tosa.equal scalar_0, scalar_0 : (tensor<1xi1>, tensor<1xi1>) -> tensor<1xi1>
+  %neg_input = tosa.sub scalar_0, scalar_1 : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
+  %result = tosa.select scalar_2, scalar_3, %is_negative : tensor<1xi1>
 }
+
+func.func @test_add() -> () {
+  // Basic block: entry
+  %result = tosa.add scalar_5, scalar_6 : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
+}
+
+func.func @test_sub() -> () {
+  // Basic block: entry
+  %result = tosa.sub scalar_8, scalar_9 : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
+}
+
+func.func @test_mul() -> () {
+  // Basic block: entry
+  %result = tosa.mul scalar_11, scalar_12 : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
+}
+
+func.func @test_negate() -> () {
+  // Basic block: entry
+  %result = tosa.sub scalar_12, scalar_14 : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
+}
+
+func.func @test_reciprocal() -> () {
+  // Basic block: entry
+  %result = tosa.int_div scalar_14, scalar_16 : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
+}
+
+func.func @test_rsqrt() -> () {
+  // Basic block: entry
+  // Function call: %sqrt_val = call float @llvm.sqrt.f32(float %input)
+  %result = tosa.int_div scalar_16, scalar_18 : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
+}
+
+func.func @test_exp() -> () {
+  // Basic block: entry
+  // Function call: %result = call float @llvm.exp.f32(float %input)
+}
+
+func.func @test_log() -> () {
+  // Basic block: entry
+  // Function call: %result = call float @llvm.log.f32(float %input)
+}
+
+func.func @test_sin() -> () {
+  // Basic block: entry
+  // Function call: %result = call float @llvm.sin.f32(float %input)
+}
+
+func.func @test_cos() -> () {
+  // Basic block: entry
+  // Function call: %result = call float @llvm.cos.f32(float %input)
+}
+
+func.func @test_tanh() -> () {
+  // Basic block: entry
+  // Function call: %pos_exp = call float @llvm.exp.f32(float %input)
+  %neg_input = tosa.sub scalar_18, scalar_24 : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
+  // Function call: %neg_exp = call float @llvm.exp.f32(float %neg_input)
+  %numerator = tosa.sub scalar_25, scalar_26 : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
+  %denominator = tosa.add scalar_27, scalar_28 : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
+  %result = tosa.int_div %numerator, %denominator : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
+}
+
+func.func @test_sigmoid() -> () {
+  // Basic block: entry
+  %neg_input = tosa.sub scalar_28, scalar_30 : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
+  // Function call: %exp_neg = call float @llvm.exp.f32(float %neg_input)
+  %one_plus_exp = tosa.add scalar_30, scalar_31 : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
+  %result = tosa.int_div scalar_31, %one_plus_exp : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
+}
+
+func.func @test_erf() -> () {
+  // Basic block: entry
+  // Function call: %abs_x = call float @llvm.fabs.f32(float %input)
+  %t = tosa.int_div scalar_31, scalar_33 : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
+  %a1 = tosa.mul scalar_34, %t : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
+  %result = tosa.add scalar_33, scalar_33 : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
+}
+
+func.func @test_floor() -> () {
+  // Basic block: entry
+  // Function call: %result = call float @llvm.floor.f32(float %input)
+}
+
+func.func @test_ceil() -> () {
+  // Basic block: entry
+  // Function call: %result = call float @llvm.ceil.f32(float %input)
+}
+
+func.func @test_clamp() -> () {
+  // Basic block: entry
+  // Function call: %clamped_min = call float @llvm.maxnum.f32(float %input, float %min_val)
+  // Function call: %result = call float @llvm.minnum.f32(float %clamped_min, float %max_val)
+}
+
+func.func @test_maximum() -> () {
+  // Basic block: entry
+  // Function call: %result = call float @llvm.maxnum.f32(float %a, float %b)
+}
+
+func.func @test_minimum() -> () {
+  // Basic block: entry
+  // Function call: %result = call float @llvm.minnum.f32(float %a, float %b)
+}
+
+func.func @test_pow() -> () {
+  // Basic block: entry
+  // Function call: %result = call float @llvm.pow.f32(float %base, float %exponent)
+}
+
+func.func @test_equal() -> () {
+  // Basic block: entry
+  %result = tosa.equal scalar_42, scalar_43 : (tensor<1xi1>, tensor<1xi1>) -> tensor<1xi1>
+  result_44 = tosa.add scalar_3, %result : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+}
+
+func.func @test_greater() -> () {
+  // Basic block: entry
+  %result = tosa.equal scalar_45, scalar_46 : (tensor<1xi1>, tensor<1xi1>) -> tensor<1xi1>
+  result_47 = tosa.add scalar_3, %result : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+}
+
+func.func @test_greater_equal() -> () {
+  // Basic block: entry
+  %result = tosa.equal scalar_48, scalar_49 : (tensor<1xi1>, tensor<1xi1>) -> tensor<1xi1>
+  result_50 = tosa.add scalar_3, %result : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+}
+
+func.func @test_select() -> () {
+  // Basic block: entry
+  %result = tosa.select %result, scalar_3, scalar_51 : tensor<1xi1>
+}
+
+func.func @test_cast_f32_to_i32() -> () {
+  // Basic block: entry
+  %result = tosa.add scalar_53, scalar_54 : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
+  result_55 = tosa.add scalar_54, %result : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+}
+
+func.func @test_bitwise_and() -> () {
+  // Basic block: entry
+  %result = tosa.bitwise_and scalar_56, scalar_57 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+  result_58 = tosa.add scalar_54, %result : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+}
+
+func.func @test_bitwise_or() -> () {
+  // Basic block: entry
+  %result = tosa.bitwise_or scalar_59, scalar_60 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+  result_61 = tosa.add scalar_54, %result : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+}
+
+func.func @test_bitwise_xor() -> () {
+  // Basic block: entry
+  %result = tosa.bitwise_xor scalar_62, scalar_63 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+  result_64 = tosa.add scalar_54, %result : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+}
+
+func.func @test_bitwise_not() -> () {
+  // Basic block: entry
+  %result = tosa.bitwise_xor scalar_65, scalar_3 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+  result_66 = tosa.add scalar_54, %result : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+}
+
+func.func @test_logical_and() -> () {
+  // Basic block: entry
+  %result = tosa.bitwise_and scalar_67, scalar_68 : (tensor<1xi1>, tensor<1xi1>) -> tensor<1xi1>
+  result_69 = tosa.add scalar_3, %result : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+}
+
+func.func @test_logical_or() -> () {
+  // Basic block: entry
+  %result = tosa.bitwise_or scalar_70, scalar_71 : (tensor<1xi1>, tensor<1xi1>) -> tensor<1xi1>
+  result_72 = tosa.add scalar_3, %result : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+}
+
+func.func @test_logical_xor() -> () {
+  // Basic block: entry
+  %result = tosa.bitwise_xor scalar_73, scalar_74 : (tensor<1xi1>, tensor<1xi1>) -> tensor<1xi1>
+  result_75 = tosa.add scalar_3, %result : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+}
+
+func.func @test_logical_not() -> () {
+  // Basic block: entry
+  %result = tosa.bitwise_xor scalar_3, scalar_76 : (tensor<1xi1>, tensor<1xi1>) -> tensor<1xi1>
+  result_77 = tosa.add scalar_3, %result : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+}
+
+func.func @test_logical_left_shift() -> () {
+  // Basic block: entry
+  %result = tosa.logical_left_shift scalar_78, scalar_79 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+  result_80 = tosa.add scalar_54, %result : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+}
+
+func.func @test_logical_right_shift() -> () {
+  // Basic block: entry
+  %result = tosa.logical_right_shift scalar_81, scalar_82 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+  result_83 = tosa.add scalar_54, %result : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+}
+
+func.func @test_arithmetic_right_shift() -> () {
+  // Basic block: entry
+  %result = tosa.arithmetic_right_shift scalar_84, scalar_85 : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+  result_86 = tosa.add scalar_54, %result : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+}
+
+func.func @test_clz() -> () {
+  // Basic block: entry
+  // Function call: %result = call i32 @llvm.ctlz.i32(i32 %input, i1 false)
+  result_87 = tosa.add scalar_54, %result : (tensor<1xi32>, tensor<1xi32>) -> tensor<1xi32>
+}
+
+func.func @test_identity() -> () {
+  // Basic block: entry
+}
+
+func.func @test_matmul(%A: tensor<?x?xf32>, %B: tensor<?x?xf32>) -> tensor<?x?xf32> {
+    // Matrix-matrix multiplication: A * B = C
+    %result = tosa.matmul %A, %B : (tensor<?x?xf32>, tensor<?x?xf32>) -> tensor<?x?xf32>
+    return %result : tensor<?x?xf32>
+  }
+
+func.func @test_conv2d(%input: tensor<1x?x?x1xf32>, %kernel: tensor<?x?x1x1xf32>) -> tensor<1x?x?x1xf32> {
+    // 2D Convolution: conv2d(input, kernel)
+    %result = tosa.conv2d %input, %kernel : (tensor<1x?x?x1xf32>, tensor<?x?x1x1xf32>) -> tensor<1x?x?x1xf32>
+    return %result : tensor<1x?x?x1xf32>
+  }
 
 }

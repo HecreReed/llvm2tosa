@@ -141,6 +141,7 @@ struct MatrixOperation {
         MATRIX_MATRIX_ADD, 
         MATRIX_VECTOR_MUL,  // matrix-vector multiplication (A*x = y)
         MATRIX_MATRIX_MUL,  // matrix-matrix multiplication (A*B = C)
+        CONV2D_OPERATION,   // 2D convolution operation
         VECTOR_SCALAR_MUL,
         VECTOR_VECTOR_ADD,
         AXPY_OPERATION,     // a*x + y pattern
@@ -244,6 +245,8 @@ private:
     NestedLoopPattern analyzeNestedLoops(const std::string& functionName);
     MatrixOperation detectMatrixOperation(const NestedLoopPattern& loopPattern);
     MatrixOperation detectMatrixMultiplicationFromInstructions(const std::string& functionName);
+    MatrixOperation detectConv2DFromInstructions(const std::string& functionName);
+    MatrixOperation detectConv2DFromLoopPattern(const NestedLoopPattern& loopPattern);
     MatrixOperation detectMatrixMatrixMul(const NestedLoopPattern& loopPattern);
     MatrixOperation detectMatrixVectorMul(const NestedLoopPattern& loopPattern);
     MatrixOperation detectVectorOperation(const NestedLoopPattern& loopPattern);

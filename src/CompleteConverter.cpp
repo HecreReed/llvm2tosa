@@ -1008,6 +1008,19 @@ void LLVMToTosaConverter::analyzeHighLevelPatterns() {
                         std::cout << "Detected matrix multiplication from instructions in " << funcName 
                                  << " type: " << static_cast<int>(matrixOp.type) << std::endl;
                     }
+                } else {
+                    // Try convolution detection as fallback
+                    matrixOp = detectConv2DFromInstructions(funcName);
+                    if (matrixOp.type != MatrixOperation::UNKNOWN) {
+                        detectedMatrixOps_[funcName] = matrixOp;
+                        FunctionSignature tensorSig = inferTensorSignature(funcName);
+                        tensorSignatures_[funcName] = tensorSig;
+                        
+                        if (debugMode_) {
+                            std::cout << "Detected convolution from instructions in " << funcName 
+                                     << " type: " << static_cast<int>(matrixOp.type) << std::endl;
+                        }
+                    }
                 }
                 if (debugMode_) {
                     std::cout << "No recognizable operation found in " << funcName << std::endl;
@@ -1097,7 +1110,24 @@ NestedLoopPattern LLVMToTosaConverter::analyzeNestedLoops(const std::string& fun
     }
     
     // Sort by loop nesting order (outer first, then inner)
-    if (loopInfo.size() == 3) {
+    if (loopInfo.size() == 4) {
+        // 4D convolution pattern (oh, ow, kh, kw loops)
+        pattern.bounds = {loopInfo[0].second, loopInfo[1].second, loopInfo[2].second, loopInfo[3].second};
+        pattern.isMatrixLoop = true; // Mark as matrix loop so it gets processed
+        
+        // Find the loop body (contains the actual computation)
+        for (const auto& [blockName, block] : basicBlocks_) {
+            if (blockName.find(funcPrefix) == 0 && 
+                blockName.find("body") != std::string::npos) {
+                pattern.bodyBlock = block.name;
+                break;
+            }
+        }
+        
+        if (debugMode_) {
+            std::cout << "Found 4D convolution pattern" << std::endl;
+        }
+    } else if (loopInfo.size() == 3) {
         // 3D matrix-matrix multiplication pattern (i, j, k loops)
         // Extract bounds in correct order
         pattern.bounds = {loopInfo[0].second, loopInfo[1].second, loopInfo[2].second};
@@ -1173,6 +1203,14 @@ MatrixOperation LLVMToTosaConverter::detectMatrixOperation(const NestedLoopPatte
     
     if (!loopPattern.isMatrixLoop || loopPattern.bodyBlock.empty()) {
         return matrixOp;
+    }
+    
+    // Check for 4D loops (convolution)
+    if (loopPattern.bounds.size() == 4) {
+        matrixOp = detectConv2DFromLoopPattern(loopPattern);
+        if (matrixOp.type != MatrixOperation::UNKNOWN) {
+            return matrixOp;
+        }
     }
     
     // Check for 3D loops (matrix-matrix multiplication)
@@ -1373,6 +1411,250 @@ MatrixOperation LLVMToTosaConverter::detectMatrixMultiplicationFromInstructions(
         };
         matrixOp.outputShape = TensorShape({-1, -1});  // C: M x N
         matrixOp.inputTensors = {"A", "B"};
+    }
+    
+    return matrixOp;
+}
+
+MatrixOperation LLVMToTosaConverter::detectConv2DFromLoopPattern(const NestedLoopPattern& loopPattern) {
+    MatrixOperation matrixOp;
+    matrixOp.type = MatrixOperation::UNKNOWN;
+    
+    if (!loopPattern.isMatrixLoop || loopPattern.bodyBlock.empty() || loopPattern.bounds.size() != 4) {
+        return matrixOp;
+    }
+    
+    // Find the loop body block and analyze convolution pattern
+    std::string bodyKey = currentFunction_ + "." + loopPattern.bodyBlock;
+    auto it = basicBlocks_.find(bodyKey);
+    if (it == basicBlocks_.end()) {
+        return matrixOp;
+    }
+    
+    const BasicBlock& bodyBlock = it->second;
+    
+    // Check for 2D convolution pattern:
+    // - Four nested loops (oh, ow, kh, kw)
+    // - Input access: input[ih][iw] where ih = oh + kh, iw = ow + kw
+    // - Kernel access: kernel[kh][kw]
+    // - Accumulation: sum += input[ih][iw] * kernel[kh][kw]
+    // - Result store: output[oh][ow] = sum
+    
+    bool hasInputIndexCalc = false;
+    bool hasKernelAccess = false;
+    bool hasInputAccess = false;
+    bool hasMultiplication = false;
+    bool hasAccumulation = false;
+    
+    if (debugMode_) {
+        std::cout << "Analyzing 4-loop convolution pattern..." << std::endl;
+        for (const auto& instr : bodyBlock.instructions) {
+            std::cout << "  Instruction: " << instr << std::endl;
+        }
+    }
+    
+    for (const auto& instr : bodyBlock.instructions) {
+        // Look for input index calculation: oh + kh, ow + kw
+        if (instr.find("add") != std::string::npos && 
+            ((instr.find("oh.val") != std::string::npos && instr.find("kh.val") != std::string::npos) ||
+             (instr.find("ow.val") != std::string::npos && instr.find("kw.val") != std::string::npos))) {
+            hasInputIndexCalc = true;
+            if (debugMode_) {
+                std::cout << "  Found input index calculation: " << instr << std::endl;
+            }
+        }
+        
+        // Look for input access
+        if (instr.find("getelementptr") != std::string::npos && instr.find("input") != std::string::npos) {
+            hasInputAccess = true;
+            if (debugMode_) {
+                std::cout << "  Found input access: " << instr << std::endl;
+            }
+        }
+        
+        // Look for kernel access
+        if (instr.find("getelementptr") != std::string::npos && instr.find("kernel") != std::string::npos) {
+            hasKernelAccess = true;
+            if (debugMode_) {
+                std::cout << "  Found kernel access: " << instr << std::endl;
+            }
+        }
+        
+        // Look for multiplication
+        if (instr.find("fmul float") != std::string::npos) {
+            hasMultiplication = true;
+            if (debugMode_) {
+                std::cout << "  Found multiplication: " << instr << std::endl;
+            }
+        }
+        
+        // Look for accumulation
+        if (instr.find("fadd float") != std::string::npos && instr.find("sum") != std::string::npos) {
+            hasAccumulation = true;
+            if (debugMode_) {
+                std::cout << "  Found accumulation: " << instr << std::endl;
+            }
+        }
+    }
+    
+    if (hasInputIndexCalc && hasInputAccess && hasKernelAccess && 
+        hasMultiplication && hasAccumulation) {
+        
+        if (debugMode_) {
+            std::cout << "  Detected 2D CONVOLUTION pattern!" << std::endl;
+            std::cout << "  4 loops with proper indexing and computation" << std::endl;
+        }
+        
+        matrixOp.type = MatrixOperation::CONV2D_OPERATION;
+        matrixOp.operation = "conv2d";
+        matrixOp.isDynamic = true;
+        
+        // Set up dynamic tensor shapes for conv2d (NHWC format)
+        matrixOp.inputShapes = {
+            TensorShape({1, -1, -1, 1}),  // input: [N, H, W, C] 
+            TensorShape({-1, -1, 1, 1})   // kernel: [KH, KW, IC, OC]
+        };
+        matrixOp.outputShape = TensorShape({1, -1, -1, 1});  // output: [N, OH, OW, OC]
+        matrixOp.inputTensors = {"input", "kernel"};
+    }
+    
+    return matrixOp;
+}
+
+MatrixOperation LLVMToTosaConverter::detectConv2DFromInstructions(const std::string& functionName) {
+    MatrixOperation matrixOp;
+    matrixOp.type = MatrixOperation::UNKNOWN;
+    
+    // Search all basic blocks for 2D convolution patterns
+    bool hasInputAccess = false;
+    bool hasKernelAccess = false; 
+    bool hasOutputStore = false;
+    bool hasInputIndexCalc = false;  // ih = oh + kh, iw = ow + kw
+    bool hasKernelIndexCalc = false; // kh * KW + kw
+    bool hasOutputIndexCalc = false; // oh * OW + ow
+    bool hasMultiplication = false;
+    bool hasAccumulation = false;
+    bool hasFourLoops = false;
+    
+    std::string funcPrefix = functionName + ".";
+    
+    // Check if we detected 4 loops (convolution signature)
+    if (debugMode_) {
+        std::cout << "Checking for 4-loop convolution pattern..." << std::endl;
+    }
+    
+    // Count loops first
+    int loopCount = 0;
+    for (const auto& [blockName, block] : basicBlocks_) {
+        if (blockName.find(funcPrefix) == 0) {
+            bool hasPhiNode = false;
+            bool hasComparison = false;
+            
+            for (const auto& instr : block.instructions) {
+                if (instr.find("phi") != std::string::npos) {
+                    hasPhiNode = true;
+                }
+                if (instr.find("icmp slt") != std::string::npos) {
+                    hasComparison = true;
+                }
+            }
+            
+            if (hasPhiNode && hasComparison) {
+                loopCount++;
+            }
+        }
+    }
+    
+    if (loopCount == 4) {
+        hasFourLoops = true;
+        if (debugMode_) {
+            std::cout << "  Found 4 loops - checking convolution pattern" << std::endl;
+        }
+    }
+    
+    // Look for specific convolution instruction patterns
+    for (const auto& [blockName, block] : basicBlocks_) {
+        if (blockName.find(funcPrefix) == 0) {
+            for (const auto& instr : block.instructions) {
+                // Pattern 1: Input index calculation (oh + kh, ow + kw)
+                if ((instr.find("add") != std::string::npos && 
+                     ((instr.find("oh.val") != std::string::npos && instr.find("kh.val") != std::string::npos) ||
+                      (instr.find("ow.val") != std::string::npos && instr.find("kw.val") != std::string::npos)))) {
+                    hasInputIndexCalc = true;
+                    if (debugMode_) {
+                        std::cout << "  Found input index calculation: " << instr << std::endl;
+                    }
+                }
+                
+                // Pattern 2: Kernel index calculation (kh * KW + kw)
+                if (instr.find("mul") != std::string::npos && 
+                    instr.find("kh.val") != std::string::npos && instr.find("KW") != std::string::npos) {
+                    hasKernelIndexCalc = true;
+                    if (debugMode_) {
+                        std::cout << "  Found kernel index calculation: " << instr << std::endl;
+                    }
+                }
+                
+                // Pattern 3: Output index calculation (oh * OW + ow)  
+                if (instr.find("mul") != std::string::npos && 
+                    instr.find("oh.val") != std::string::npos && instr.find("OW") != std::string::npos) {
+                    hasOutputIndexCalc = true;
+                    if (debugMode_) {
+                        std::cout << "  Found output index calculation: " << instr << std::endl;
+                    }
+                }
+                
+                // Pattern 4: Input access
+                if (instr.find("getelementptr") != std::string::npos && instr.find("input") != std::string::npos) {
+                    hasInputAccess = true;
+                }
+                
+                // Pattern 5: Kernel access
+                if (instr.find("getelementptr") != std::string::npos && instr.find("kernel") != std::string::npos) {
+                    hasKernelAccess = true;
+                }
+                
+                // Pattern 6: Output store
+                if (instr.find("store float") != std::string::npos && instr.find("output") != std::string::npos) {
+                    hasOutputStore = true;
+                }
+                
+                // Pattern 7: Floating point multiplication
+                if (instr.find("fmul float") != std::string::npos) {
+                    hasMultiplication = true;
+                }
+                
+                // Pattern 8: Accumulation with sum
+                if (instr.find("fadd float") != std::string::npos && instr.find("sum") != std::string::npos) {
+                    hasAccumulation = true;
+                }
+            }
+        }
+    }
+    
+    // If we found the classic 2D convolution pattern
+    if (hasFourLoops && hasInputIndexCalc && hasKernelIndexCalc && hasOutputIndexCalc &&
+        hasInputAccess && hasKernelAccess && hasOutputStore &&
+        hasMultiplication && hasAccumulation) {
+        
+        if (debugMode_) {
+            std::cout << "  Detected 2D CONVOLUTION from instruction analysis!" << std::endl;
+        }
+        
+        matrixOp.type = MatrixOperation::CONV2D_OPERATION;
+        matrixOp.operation = "conv2d";
+        matrixOp.isDynamic = true; // Assume dynamic since we see %IH, %IW, %KH, %KW parameters
+        
+        // Set up dynamic tensor shapes for conv2d
+        // Input: [1, IH, IW, 1] (NHWC format)
+        // Kernel: [KH, KW, 1, 1] 
+        // Output: [1, OH, OW, 1]
+        matrixOp.inputShapes = {
+            TensorShape({1, -1, -1, 1}),  // input: [N, H, W, C] 
+            TensorShape({-1, -1, 1, 1})   // kernel: [KH, KW, IC, OC]
+        };
+        matrixOp.outputShape = TensorShape({1, -1, -1, 1});  // output: [N, OH, OW, OC]
+        matrixOp.inputTensors = {"input", "kernel"};
     }
     
     return matrixOp;
@@ -1968,6 +2250,17 @@ FunctionSignature LLVMToTosaConverter::inferTensorSignature(const std::string& f
             // Matrix-matrix multiplication returns a matrix
             sig.returnType = TensorType(matrixOp.outputShape, DataType::FLOAT32);
             sig.isVoidReturn = false;
+        } else if (matrixOp.type == MatrixOperation::CONV2D_OPERATION) {
+            // Create tensor parameter types for 2D convolution: input, kernel -> output
+            for (size_t i = 0; i < matrixOp.inputShapes.size(); ++i) {
+                TensorType tensorType(matrixOp.inputShapes[i], DataType::FLOAT32);
+                std::string paramName = matrixOp.inputTensors[i];
+                sig.parameters.push_back({paramName, tensorType});
+            }
+            
+            // 2D convolution returns a tensor
+            sig.returnType = TensorType(matrixOp.outputShape, DataType::FLOAT32);
+            sig.isVoidReturn = false;
         }
     }
     
@@ -2077,6 +2370,19 @@ std::string LLVMToTosaConverter::generateHighLevelTOSA(const MatrixOperation& ma
     } else if (matrixOp.type == MatrixOperation::MATRIX_MATRIX_MUL) {
         ss << "    // Matrix-matrix multiplication: A * B = C" << std::endl;
         ss << "    %result = tosa.matmul %" << sig.parameters[0].first << ", %" << sig.parameters[1].first;
+        ss << " : (" << utils::formatTensorType(sig.parameters[0].second) << ", ";
+        ss << utils::formatTensorType(sig.parameters[1].second) << ") -> ";
+        ss << utils::formatTensorType(sig.returnType) << std::endl;
+        
+        if (!sig.isVoidReturn) {
+            ss << "    return %result : ";
+            ss << utils::formatTensorType(sig.returnType) << std::endl;
+        } else {
+            ss << "    func.return" << std::endl;
+        }
+    } else if (matrixOp.type == MatrixOperation::CONV2D_OPERATION) {
+        ss << "    // 2D Convolution: conv2d(input, kernel)" << std::endl;
+        ss << "    %result = tosa.conv2d %" << sig.parameters[0].first << ", %" << sig.parameters[1].first;
         ss << " : (" << utils::formatTensorType(sig.parameters[0].second) << ", ";
         ss << utils::formatTensorType(sig.parameters[1].second) << ") -> ";
         ss << utils::formatTensorType(sig.returnType) << std::endl;

@@ -151,8 +151,19 @@ std::string LLVMToTosaConverter::convertBinaryInstruction(LLVMOpcode opcode, con
                 break;
             case LLVMOpcode::UDiv:
             case LLVMOpcode::SDiv:
-            case LLVMOpcode::FDiv:
                 tosaOp = "tosa.int_div";
+                break;
+            case LLVMOpcode::FDiv:
+                // Check if this is a reciprocal pattern (1.0 / x)
+                if (lhs == "1.0" || lhs == "1") {
+                    std::stringstream ss;
+                    ss << resultName << " = tosa.reciprocal " << rhsTensor
+                       << " : " << utils::formatTensorType(tensorType);
+                    valueMapping_[resultName] = Value(resultName, tensorType);
+                    return ss.str();
+                } else {
+                    tosaOp = "tosa.div";
+                }
                 break;
             case LLVMOpcode::And:
                 tosaOp = "tosa.bitwise_and";
@@ -604,43 +615,91 @@ std::string LLVMToTosaConverter::convertCastInstruction(LLVMOpcode opcode, const
     std::string resultType = parseResultType(instruction);
     
     if (!operands.empty()) {
-        TensorType tensorType = convertLLVMTypeToTensorType(resultType);
-        std::string operand = ensureTensorValue(operands[0], tensorType);
+        TensorType srcType = convertLLVMTypeToTensorType("float");  // Default source type
+        TensorType dstType = convertLLVMTypeToTensorType(resultType);
+        std::string operand = ensureTensorValue(operands[0], srcType);
         
         std::stringstream ss;
-        ss << resultName << " = tosa.cast " << operand 
-           << " : " << utils::formatTensorType(tensorType) 
-           << " -> " << utils::formatTensorType(tensorType);
         
-        valueMapping_[resultName] = Value(resultName, tensorType);
+        // Handle specific cast operations
+        if (instruction.find("fptosi") != std::string::npos) {
+            // Float to signed integer
+            ss << resultName << " = tosa.cast " << operand 
+               << " : " << utils::formatTensorType(srcType) 
+               << " to " << utils::formatTensorType(dstType);
+        } else if (instruction.find("sitofp") != std::string::npos) {
+            // Signed integer to float
+            ss << resultName << " = tosa.cast " << operand 
+               << " : " << utils::formatTensorType(srcType) 
+               << " to " << utils::formatTensorType(dstType);
+        } else {
+            // Generic cast
+            ss << resultName << " = tosa.cast " << operand 
+               << " : " << utils::formatTensorType(srcType) 
+               << " to " << utils::formatTensorType(dstType);
+        }
+        
+        valueMapping_[resultName] = Value(resultName, dstType);
         return ss.str();
     }
     return "";
 }
 
 std::string LLVMToTosaConverter::convertComparisonInstruction(LLVMOpcode opcode, const std::string& instruction) {
-    auto operands = parseOperands(instruction);
     std::string resultName = parseResultName(instruction);
     
-    if (operands.size() >= 3) {
-        std::string predicate = operands[0];
-        std::string lhs = operands[1];
-        std::string rhs = operands[2];
+    // Extract predicate from fcmp/icmp instruction
+    std::regex cmpRegex(R"((fcmp|icmp)\s+([a-z]+)\s+([^,]+),\s*(.+))");
+    std::smatch match;
+    
+    if (std::regex_search(instruction, match, cmpRegex)) {
+        std::string cmpType = match[1].str();  // fcmp or icmp
+        std::string predicate = match[2].str(); // ogt, eq, etc.
+        std::string lhs = match[3].str();
+        std::string rhs = match[4].str();
+        
+        // Clean up operands (remove type info)
+        std::regex operandRegex(R"(([^%\s]*\s+)?(%[a-zA-Z_][a-zA-Z0-9_]*|[0-9.]+))");
+        std::smatch lhsMatch, rhsMatch;
+        if (std::regex_search(lhs, lhsMatch, operandRegex)) {
+            lhs = lhsMatch[2].str();
+        }
+        if (std::regex_search(rhs, rhsMatch, operandRegex)) {
+            rhs = rhsMatch[2].str();
+        }
+        
+        // Determine input tensor type
+        TensorType inputTensorType;
+        if (cmpType == "icmp") {
+            inputTensorType = TensorType({1}, DataType::INT32);
+        } else {
+            inputTensorType = TensorType({1}, DataType::FLOAT32);
+        }
         
         TensorType boolType({1}, DataType::BOOL);
-        std::string lhsTensor = ensureTensorValue(lhs, boolType);
-        std::string rhsTensor = ensureTensorValue(rhs, boolType);
+        std::string lhsTensor = ensureTensorValue(lhs, inputTensorType);
+        std::string rhsTensor = ensureTensorValue(rhs, inputTensorType);
         
         std::string tosaOp;
-        if (predicate == "eq") tosaOp = "tosa.equal";
-        else if (predicate == "sgt" || predicate == "ugt") tosaOp = "tosa.greater";
-        else if (predicate == "sge" || predicate == "uge") tosaOp = "tosa.greater_equal";
+        if (predicate == "eq" || predicate == "oeq") tosaOp = "tosa.equal";
+        else if (predicate == "sgt" || predicate == "ugt" || predicate == "ogt") tosaOp = "tosa.greater";
+        else if (predicate == "sge" || predicate == "uge" || predicate == "oge") tosaOp = "tosa.greater_equal";
+        else if (predicate == "slt" || predicate == "ult" || predicate == "olt") {
+            // Convert less-than to greater-than by swapping operands
+            std::swap(lhsTensor, rhsTensor);
+            tosaOp = "tosa.greater";
+        }
+        else if (predicate == "sle" || predicate == "ule" || predicate == "ole") {
+            // Convert less-equal to greater-equal by swapping operands
+            std::swap(lhsTensor, rhsTensor);
+            tosaOp = "tosa.greater_equal";
+        }
         else tosaOp = "tosa.equal";
         
         std::stringstream ss;
         ss << resultName << " = " << tosaOp << " " << lhsTensor << ", " << rhsTensor
-           << " : (" << utils::formatTensorType(boolType) << ", " 
-           << utils::formatTensorType(boolType) << ") -> " 
+           << " : (" << utils::formatTensorType(inputTensorType) << ", " 
+           << utils::formatTensorType(inputTensorType) << ") -> " 
            << utils::formatTensorType(boolType);
         
         valueMapping_[resultName] = Value(resultName, boolType);
@@ -712,8 +771,153 @@ std::string LLVMToTosaConverter::convertOtherInstruction(LLVMOpcode opcode, cons
             }
             break;
         }
-        case LLVMOpcode::Call:
+        case LLVMOpcode::Call: {
+            // Extract function name and arguments from call instruction
+            std::regex callRegex(R"(call\s+[^@]*@([a-zA-Z_][a-zA-Z0-9_\.]*)\s*\(([^)]*)\))");
+            std::smatch match;
+            
+            if (std::regex_search(instruction, match, callRegex)) {
+                std::string funcName = match[1].str();
+                std::string argsStr = match[2].str();
+                std::string resultName = parseResultName(instruction);
+                std::string resultType = parseResultType(instruction);
+                
+                TensorType tensorType = convertLLVMTypeToTensorType(resultType);
+                
+                // Parse arguments from call instruction
+                std::vector<std::string> callArgs;
+                std::regex argRegex(R"(([^%\s]*\s+)?(%[a-zA-Z_][a-zA-Z0-9_]*|[0-9.]+))");
+                std::sregex_iterator iter(argsStr.begin(), argsStr.end(), argRegex);
+                std::sregex_iterator end;
+                for (; iter != end; ++iter) {
+                    callArgs.push_back(iter->str(2));
+                }
+                
+                // Map LLVM intrinsic functions to TOSA operations
+                if (funcName == "llvm.sqrt.f32") {
+                    if (!callArgs.empty()) {
+                        std::string input = ensureTensorValue(callArgs[0], tensorType);
+                        std::stringstream ss;
+                        ss << resultName << " = tosa.rsqrt " << input 
+                           << " : " << utils::formatTensorType(tensorType);
+                        ss << "\n  " << resultName << "_sqrt = tosa.reciprocal " << resultName
+                           << " : " << utils::formatTensorType(tensorType);
+                        valueMapping_[resultName + "_sqrt"] = Value(resultName + "_sqrt", tensorType);
+                        return ss.str();
+                    }
+                } else if (funcName == "llvm.exp.f32") {
+                    if (!callArgs.empty()) {
+                        std::string input = ensureTensorValue(callArgs[0], tensorType);
+                        std::stringstream ss;
+                        ss << resultName << " = tosa.exp " << input 
+                           << " : " << utils::formatTensorType(tensorType);
+                        valueMapping_[resultName] = Value(resultName, tensorType);
+                        return ss.str();
+                    }
+                } else if (funcName == "llvm.log.f32") {
+                    if (!callArgs.empty()) {
+                        std::string input = ensureTensorValue(callArgs[0], tensorType);
+                        std::stringstream ss;
+                        ss << resultName << " = tosa.log " << input 
+                           << " : " << utils::formatTensorType(tensorType);
+                        valueMapping_[resultName] = Value(resultName, tensorType);
+                        return ss.str();
+                    }
+                } else if (funcName == "llvm.sin.f32") {
+                    if (!callArgs.empty()) {
+                        std::string input = ensureTensorValue(callArgs[0], tensorType);
+                        std::stringstream ss;
+                        ss << resultName << " = tosa.sin " << input 
+                           << " : " << utils::formatTensorType(tensorType);
+                        valueMapping_[resultName] = Value(resultName, tensorType);
+                        return ss.str();
+                    }
+                } else if (funcName == "llvm.cos.f32") {
+                    if (!callArgs.empty()) {
+                        std::string input = ensureTensorValue(callArgs[0], tensorType);
+                        std::stringstream ss;
+                        ss << resultName << " = tosa.cos " << input 
+                           << " : " << utils::formatTensorType(tensorType);
+                        valueMapping_[resultName] = Value(resultName, tensorType);
+                        return ss.str();
+                    }
+                } else if (funcName == "llvm.floor.f32") {
+                    if (!callArgs.empty()) {
+                        std::string input = ensureTensorValue(callArgs[0], tensorType);
+                        std::stringstream ss;
+                        ss << resultName << " = tosa.floor " << input 
+                           << " : " << utils::formatTensorType(tensorType);
+                        valueMapping_[resultName] = Value(resultName, tensorType);
+                        return ss.str();
+                    }
+                } else if (funcName == "llvm.ceil.f32") {
+                    if (!callArgs.empty()) {
+                        std::string input = ensureTensorValue(callArgs[0], tensorType);
+                        std::stringstream ss;
+                        ss << resultName << " = tosa.ceil " << input 
+                           << " : " << utils::formatTensorType(tensorType);
+                        valueMapping_[resultName] = Value(resultName, tensorType);
+                        return ss.str();
+                    }
+                } else if (funcName == "llvm.fabs.f32") {
+                    if (!callArgs.empty()) {
+                        std::string input = ensureTensorValue(callArgs[0], tensorType);
+                        std::stringstream ss;
+                        ss << resultName << " = tosa.abs " << input 
+                           << " : " << utils::formatTensorType(tensorType);
+                        valueMapping_[resultName] = Value(resultName, tensorType);
+                        return ss.str();
+                    }
+                } else if (funcName == "llvm.maxnum.f32") {
+                    if (callArgs.size() >= 2) {
+                        std::string input1 = ensureTensorValue(callArgs[0], tensorType);
+                        std::string input2 = ensureTensorValue(callArgs[1], tensorType);
+                        std::stringstream ss;
+                        ss << resultName << " = tosa.maximum " << input1 << ", " << input2
+                           << " : (" << utils::formatTensorType(tensorType) << ", "
+                           << utils::formatTensorType(tensorType) << ") -> "
+                           << utils::formatTensorType(tensorType);
+                        valueMapping_[resultName] = Value(resultName, tensorType);
+                        return ss.str();
+                    }
+                } else if (funcName == "llvm.minnum.f32") {
+                    if (callArgs.size() >= 2) {
+                        std::string input1 = ensureTensorValue(callArgs[0], tensorType);
+                        std::string input2 = ensureTensorValue(callArgs[1], tensorType);
+                        std::stringstream ss;
+                        ss << resultName << " = tosa.minimum " << input1 << ", " << input2
+                           << " : (" << utils::formatTensorType(tensorType) << ", "
+                           << utils::formatTensorType(tensorType) << ") -> "
+                           << utils::formatTensorType(tensorType);
+                        valueMapping_[resultName] = Value(resultName, tensorType);
+                        return ss.str();
+                    }
+                } else if (funcName == "llvm.pow.f32") {
+                    if (callArgs.size() >= 2) {
+                        std::string base = ensureTensorValue(callArgs[0], tensorType);
+                        std::string exp = ensureTensorValue(callArgs[1], tensorType);
+                        std::stringstream ss;
+                        ss << resultName << " = tosa.pow " << base << ", " << exp
+                           << " : (" << utils::formatTensorType(tensorType) << ", "
+                           << utils::formatTensorType(tensorType) << ") -> "
+                           << utils::formatTensorType(tensorType);
+                        valueMapping_[resultName] = Value(resultName, tensorType);
+                        return ss.str();
+                    }
+                } else if (funcName == "llvm.ctlz.i32") {
+                    if (!callArgs.empty()) {
+                        std::string input = ensureTensorValue(callArgs[0], tensorType);
+                        std::stringstream ss;
+                        ss << resultName << " = tosa.clz " << input 
+                           << " : " << utils::formatTensorType(tensorType);
+                        valueMapping_[resultName] = Value(resultName, tensorType);
+                        return ss.str();
+                    }
+                }
+            }
+            
             return "// Function call: " + instruction;
+        }
         case LLVMOpcode::PHI:
             return "// PHI node: " + instruction;
         default:
@@ -927,15 +1131,9 @@ std::string LLVMToTosaConverter::ensureTensorValue(const std::string& value, con
 }
 
 std::string LLVMToTosaConverter::createTensorFromScalar(const std::string& scalarValue, DataType type) {
-    std::string tensorName = generateUniqueName("scalar");
+    std::string tensorName = generateUniqueName("const");
     TensorType tensorType({1}, type);
     
-    std::stringstream ss;
-    ss << tensorName << " = tosa.const {value = dense<" << scalarValue 
-       << "> : " << utils::formatTensorType(tensorType) << "} : () -> " 
-       << utils::formatTensorType(tensorType);
-    
-    // This would need to be added to the output stream
     valueMapping_[scalarValue] = Value(tensorName, tensorType);
     
     return tensorName;

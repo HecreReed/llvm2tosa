@@ -1519,6 +1519,17 @@ FunctionSignature LLVMToTosaConverter::inferTensorSignature(const std::string& f
             // AXPY returns the modified vector
             sig.returnType = TensorType(matrixOp.outputShape, DataType::FLOAT32);
             sig.isVoidReturn = false;
+        } else if (matrixOp.type == MatrixOperation::DOT_PRODUCT) {
+            // Create tensor parameter types for dot product: vector, vector -> scalar
+            for (size_t i = 0; i < matrixOp.inputShapes.size(); ++i) {
+                TensorType tensorType(matrixOp.inputShapes[i], DataType::FLOAT32);
+                std::string paramName = matrixOp.inputTensors[i];
+                sig.parameters.push_back({paramName, tensorType});
+            }
+            
+            // Dot product returns a scalar
+            sig.returnType = TensorType(matrixOp.outputShape, DataType::FLOAT32);
+            sig.isVoidReturn = false;
         }
     }
     
